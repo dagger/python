@@ -37,6 +37,20 @@ type Pyproject {
   """
   pub includeExtraFiles: [String!]!
 
+  """
+  Python version of the default base image. Null when a custom base is set.
+  """
+  pub version: String
+
+  """
+  Base image every project container is built from, with uv already on PATH.
+
+  A tool that needs no Python runtime never asks for this. Ruff is the case
+  that matters: it is a standalone binary, it reaches the same verdicts with no
+  interpreter present, and an environment would only make it slower.
+  """
+  pub base: Container!
+
   new(
     """
     Files whose presence marks a directory as a project root, for example
@@ -61,14 +75,60 @@ type Pyproject {
     Extra workspace-root include patterns mounted for every project.
     """
     includeExtraFiles: [String!]! = [],
+    """
+    Python version of the default base image. Mutually exclusive with base.
+    """
+    version: String = null,
+    """
+    Base image every project container is built from. Expected to provide a
+    Python interpreter and uv on PATH. Mutually exclusive with version.
+    """
+    base: Container = null,
   ) {
     if (markers.isEmpty) {
       raise "markers must not be empty: the caller decides what a project is"
     }
+    if (version != null and base != null) {
+      raise "version and base are mutually exclusive"
+    }
     self.markers = markers
     self.exclude = exclude
     self.includeExtraFiles = includeExtraFiles
+    self.version = if (base == null) { version ?? defaultVersion } else { null }
+    self.base = base ?? defaultBase(version ?? defaultVersion)
     self
+  }
+
+  """
+  Python version used when the caller gives neither a version nor a base.
+  """
+  let defaultVersion: String! = "3.13"
+
+  """
+  The pinned uv release, extracted from the bundled Docker image so Dependabot
+  can track it in pyproject/images/uv/Dockerfile.
+  """
+  let uvBinary: Directory! {
+    currentModule.source.directory("images/uv").dockerBuild.rootfs
+  }
+
+  """
+  A python:<version>-slim base with the pinned uv on PATH.
+
+  Debian rather than Alpine: Python wheels are manylinux, so a musl base forces
+  source builds across most of the ecosystem.
+  """
+  let defaultBase(pythonVersion: String!): Container! {
+    container
+      .from("python:" + pythonVersion + "-slim")
+      .withoutEntrypoint
+      .withEnvVariable("UV_CACHE_DIR", "/root/.cache/uv")
+      .withMountedCache("/root/.cache/uv", cacheVolume("uv-cache"))
+      # The cache volume and the workdir are different filesystems, so uv's
+      # default hardlink install mode falls back to a copy with a warning.
+      .withEnvVariable("UV_LINK_MODE", "copy")
+      .withEnvVariable("UV_NO_PROGRESS", "1")
+      .withDirectory("/usr/local/bin", uvBinary, include: ["uv", "uvx"])
   }
 
   """
@@ -100,6 +160,7 @@ type Pyproject {
       markers: markers,
       exclude: exclude,
       includeExtraFiles: includeExtraFiles,
+      baseImage: base,
     )
   }
 
@@ -184,6 +245,11 @@ type PythonProject {
   Extra workspace-root include patterns mounted for this project's commands.
   """
   pub includeExtraFiles: [String!]!
+
+  """
+  Base image this project's containers are built from.
+  """
+  let baseImage: Container!
 
   """
   A workspace-root path for a project-relative subpath.
@@ -311,6 +377,43 @@ type PythonProject {
   """
   pub source(ws: Workspace!): Directory! {
     ws.directory("/", include: include, exclude: exclude)
+  }
+
+  """
+  Container with this project's source mounted and its root as the workdir.
+
+  Every tool that needs a Python runtime starts here, so a workspace does not
+  build one container per tool where one would do.
+  """
+  pub container(ws: Workspace!): Container! {
+    baseImage
+      .withWorkdir("/ws")
+      .withDirectory(".", source(ws))
+      .withWorkdir(path)
+  }
+
+  """
+  Command-line flags that keep this project's nested projects out of a tool
+  run, given the flag that tool spells exclusions with.
+
+  Both mypy and ty take a pattern rather than a path, so a directory named
+  "sdk-v1.2" would otherwise also exclude a sibling "sdk-v1X2". `regex` picks
+  which escaping the pattern needs.
+  """
+  pub excludeNestedFlags(ws: Workspace!, flag: String!, regex: Boolean!): [String!]! {
+    nestedProjects(ws).reduce([]) { flags, dir =>
+      flags + [flag, if (regex) { "^" + Regexp.escape(dir) + "/" } else { quoteGlob(dir) + "/" }]
+    }
+  }
+
+  """
+  Backslash-escape the characters a gitignore-style glob treats as special, so
+  a literal directory name matches only itself.
+  """
+  let quoteGlob(literal: String!): String! {
+    ["\\", "*", "?", "[", "]", "{", "}"].reduce(literal) { escaped, char =>
+      escaped.replace(old: char, new: "\\" + char)
+    }
   }
 
   """
