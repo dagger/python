@@ -1,0 +1,393 @@
+"""
+End-to-end checks for the Python module family.
+"""
+type E2e {
+  let passFixture: String! = "testdata/project-pass"
+  let noTestsFixture: String! = "testdata/project-no-tests"
+  let nestedFixture: String! = "testdata/project-nested"
+  let nestedChildFixture: String! = "testdata/project-nested/child"
+  let deepFixture: String! = "testdata/deep/a/b/c"
+  let venvFixture: String! = "testdata/project-venv"
+  let metacharFixture: String! = "testdata/project-metachar"
+  let metacharNestedFixture: String! = "testdata/project-metachar/sub.v2"
+  let pinnedFixture: String! = "testdata/project-pinned"
+  let requiredFixture: String! = "testdata/project-required"
+  let ruffTomlFixture: String! = "testdata/project-ruff-toml"
+  let regenerateFixture: String! = "testdata/project-regenerate"
+
+  """
+  The library as a pyproject.toml consumer sees it.
+  """
+  let lib: Pyproject! {
+    pyproject(markers: ["pyproject.toml"])
+  }
+
+  let assert(condition: Boolean!, message: String!): Void {
+    if (condition == false) {
+      raise message
+    }
+    null
+  }
+
+  let paths(projects: [{{path: String!}}!]!): [String!]! {
+    projects.map { project => project.path }
+  }
+
+  """
+  The message raised by looking up the project containing `path`, or that
+  project's root when the lookup unexpectedly succeeds.
+  """
+  let lookupFailure(ws: Workspace!, path: String!): String! {
+    lib.project(ws, path).path rescue {
+      err: Error => err.message
+    }
+  }
+
+  """
+  The message raised by constructing the library with no markers, or the
+  markers it accepted when the construction unexpectedly succeeds.
+  """
+  let emptyMarkersFailure: String! {
+    pyproject(markers: []).markers.join(", ") rescue {
+      err: Error => err.message
+    }
+  }
+
+  """
+  Discovery returns exactly the directories holding a marker, at any depth, and
+  never invents one.
+  """
+  discoveryCheck(ws: Workspace!): Void @check {
+    let found = paths(lib.projects(ws).{{path}})
+
+    let missing = [passFixture, nestedFixture, nestedChildFixture, deepFixture]
+      .reject { path => found.contains(path) }
+    assert(missing.isEmpty, "discovery missed projects: " + missing.join(", "))
+
+    let invented = [".", "testdata", "testdata/deep/a", passFixture + "/tests"]
+      .filter { path => found.contains(path) }
+    assert(invented.isEmpty, "discovery invented projects: " + invented.join(", "))
+
+    assert(found.length == found.uniq.length, "discovery reported a project twice")
+    null
+  }
+
+  """
+  The caller's markers decide what a project is; the library never assumes.
+
+  The ruff.toml fixture has no pyproject.toml, so it is a project for a caller
+  that looks for ruff.toml and nothing at all for a caller that does not.
+  """
+  markersCheck(ws: Workspace!): Void @check {
+    let byRuffToml = paths(pyproject(markers: ["ruff.toml"]).projects(ws).{{path}})
+    assert(
+      byRuffToml.contains(ruffTomlFixture),
+      "a ruff.toml caller did not discover its own project: " + byRuffToml.join(", "),
+    )
+    assert(
+      byRuffToml.contains(passFixture) == false,
+      "a ruff.toml caller discovered a pyproject.toml project",
+    )
+
+    assert(
+      paths(lib.projects(ws).{{path}}).contains(ruffTomlFixture) == false,
+      "a pyproject.toml caller discovered a ruff.toml project",
+    )
+
+    let both = paths(pyproject(markers: ["pyproject.toml", "ruff.toml"]).projects(ws).{{path}})
+    assert(
+      both.contains(ruffTomlFixture) and both.contains(passFixture),
+      "a two-marker caller missed one of its project kinds",
+    )
+
+    assert(
+      emptyMarkersFailure.contains("markers must not be empty"),
+      "the library accepted an empty marker list: " + emptyMarkersFailure,
+    )
+    null
+  }
+
+  """
+  A virtualenv vendors third-party manifests; none of them is a project of this
+  workspace, and no project scan walks into one.
+  """
+  venvDiscoveryCheck(ws: Workspace!): Void @check {
+    let found = paths(lib.projects(ws).{{path}})
+    assert(
+      found.contains(venvFixture),
+      "discovery missed the project owning a virtualenv",
+    )
+    let vendored = found.filter { path => path.contains(".venv") }
+    assert(
+      vendored.isEmpty,
+      "discovery walked into a virtualenv: " + vendored.join(", "),
+    )
+    assert(
+      lib.project(ws, venvFixture).nestedProjects(ws).isEmpty,
+      "the nested project scan walked into a virtualenv",
+    )
+    null
+  }
+
+  """
+  Discovery is anchored at the workspace cwd, but the roots it reports stay
+  workspace-root-relative, so they remain usable with every other workspace API.
+  """
+  discoveryFromSubdirCheck(ws: Workspace!): Void @check {
+    let below = paths(lib.projects(ws.withWorkdir(nestedFixture)).{{path}})
+    assert(
+      below.contains(nestedFixture),
+      "discovery from a project root missed that project",
+    )
+    assert(
+      below.contains(nestedChildFixture),
+      "discovery from a project root missed a project below it",
+    )
+    assert(
+      below.contains(passFixture) == false,
+      "discovery from a subdirectory reached a project outside it",
+    )
+
+    # A root reported as ".." has to survive being mounted, not just be spelled
+    # right: every source mount resolves it against the workspace root.
+    let inside = ws.withWorkdir(passFixture + "/tests")
+    assert(
+      paths(lib.projects(inside).{{path}}).contains(passFixture),
+      "discovery inside a project missed the enclosing project",
+    )
+    assert(
+      lib.project(inside, passFixture).source(inside).glob("**/*.py").isEmpty == false,
+      "a project discovered from a subdirectory mounted no source",
+    )
+
+    # The enclosing project is reported for context but sits above the cwd.
+    assert(
+      lib.project(inside, passFixture).withinCwd(inside) == false,
+      "an enclosing project was reported as within the cwd",
+    )
+    assert(
+      lib.project(ws, nestedChildFixture).withinCwd(ws.withWorkdir(nestedFixture)),
+      "a project below the cwd was reported as outside it",
+    )
+    assert(
+      lib.project(ws, nestedFixture).withinCwd(ws.withWorkdir(nestedFixture)),
+      "the cwd's own project was reported as outside it",
+    )
+    assert(
+      lib.project(ws, passFixture).withinCwd(ws),
+      "every project should be within a workspace-root cwd",
+    )
+    null
+  }
+
+  """
+  Project lookup snaps to the containing root, prefers the deepest marker, and
+  can be told to take a path as a root it never verifies.
+  """
+  lookupCheck(ws: Workspace!): Void @check {
+    let found = lib.project(ws, passFixture + "/tests")
+    assert(
+      found.path == passFixture,
+      "lookup did not snap to the containing project: " + found.path,
+    )
+
+    let direct = lib.project(ws, passFixture + "/tests", findUp: false)
+    assert(
+      direct.path == passFixture + "/tests",
+      "lookup snapped with findUp false: " + direct.path,
+    )
+
+    # The child's own marker is deeper than the parent's, so it wins.
+    assert(
+      lib.project(ws, nestedChildFixture).path == nestedChildFixture,
+      "lookup from a nested root preferred the parent",
+    )
+
+    let missing = lookupFailure(ws, "images")
+    assert(
+      missing.contains("no project found containing path"),
+      "lookup outside any project did not fail: " + missing,
+    )
+    null
+  }
+
+  """
+  Gitignore-style selection: "!" excludes, an exclude always wins, and an
+  include-only list scopes down.
+  """
+  selectionCheck(ws: Workspace!): Void @check {
+    assert(selects(ws, ["**"], "a/b"), "\"**\" did not select a project")
+    assert(selects(ws, ["*"], "a/b"), "\"*\" did not select a project")
+
+    # A bare path and "X/**" both mean "X and everything below it".
+    assert(selects(ws, ["**", "!docs"], "docs") == false, "exclude missed the project itself")
+    assert(selects(ws, ["**", "!docs"], "docs/snippets") == false, "exclude missed a nested project")
+    assert(selects(ws, ["**", "!docs/**"], "docs/snippets") == false, "\"X/**\" exclude missed a nested project")
+
+    # The subtree boundary: "docs" must not match a sibling sharing the prefix.
+    assert(selects(ws, ["**", "!docs"], "docs-tools"), "exclude leaked across a name-prefix boundary")
+
+    assert(selects(ws, ["!docs"], "docs") == false, "exclude-only list did not exclude")
+    assert(selects(ws, ["!docs"], "core"), "exclude-only list did not include the rest")
+    assert(selects(ws, ["."], "core") == false, "\".\" leaked to a non-root project")
+    assert(selects(ws, ["."], "."), "\".\" did not select the root project")
+    assert(selects(ws, ["!."], ".") == false, "\"!.\" did not exclude the root project")
+
+    # An exclude always wins; a later bare pattern does not re-include.
+    assert(selects(ws, ["**", "!docs", "docs/keep"], "docs/keep") == false, "a later include overrode an exclude")
+
+    assert(selects(ws, [], "anything"), "empty selection did not select all")
+    assert(selects(ws, ["!**"], "anything") == false, "\"!**\" selected a project")
+
+    # Unsupported glob shapes are not interpreted, so they select nothing.
+    assert(selects(ws, ["a/**/b"], "a/x/b") == false, "mid-path \"**\" was unexpectedly interpreted")
+    null
+  }
+
+  """
+  Whether a project at projectPath is selected by `patterns`.
+  Uses findUp: false so projectPath need not be a real project on disk.
+  """
+  let selects(ws: Workspace!, patterns: [String!]!, projectPath: String!): Boolean! {
+    lib.project(ws, projectPath, findUp: false).selected(patterns)
+  }
+
+  """
+  A nested project is its own project: the parent mounts its subtree but never
+  counts the child's files as its own.
+  """
+  nestedIsolationCheck(ws: Workspace!): Void @check {
+    let parent = lib.project(ws, nestedFixture)
+    assert(
+      parent.nestedProjects(ws).contains("child"),
+      "parent did not report its nested project: " + parent.nestedProjects(ws).join(", "),
+    )
+    assert(
+      parent.source(ws).file(nestedChildFixture + "/pyproject.toml").contents.contains("child"),
+      "parent source did not mount the nested project tree",
+    )
+
+    let child = lib.project(ws, nestedChildFixture)
+    assert(child.nestedProjects(ws).isEmpty, "a leaf project reported nested projects")
+
+    # Only the child has test files, so the parent must not claim them.
+    let childOnly = lib.project(ws, metacharFixture)
+    assert(
+      childOnly.nestedProjects(ws).contains("sub.v2"),
+      "parent did not report its dotted nested project: " +
+        childOnly.nestedProjects(ws).join(", "),
+    )
+    assert(
+      lib.project(ws, metacharNestedFixture).hasOwnFiles(ws, ["**/*.py"]),
+      "the dotted nested project reported no Python files of its own",
+    )
+
+    assert(
+      child.hasOwnFiles(ws, ["**/test_*.py"]),
+      "a project with test files reported none",
+    )
+    assert(
+      lib.project(ws, noTestsFixture).hasOwnFiles(ws, ["**/test_*.py"]) == false,
+      "a project without test files reported some",
+    )
+    assert(
+      lib.project(ws, deepFixture).hasOwnFiles(ws, ["**/*.py"]) == false,
+      "a project without Python files reported some",
+    )
+    null
+  }
+
+  """
+  Source selection scopes to the project tree, drops the never-mounted paths,
+  and carries the caller's extra workspace-root files.
+  """
+  sourceCheck(ws: Workspace!): Void @check {
+    let project = lib.project(ws, passFixture)
+
+    assert(
+      project.includeBase.contains(passFixture + "/**"),
+      "base includes did not scope to the project directory",
+    )
+    assert(
+      project.includeBase.contains("**") == false,
+      "base includes exposed a workspace-wide pattern",
+    )
+
+    let files = project.source(ws).glob("**/*.py")
+    assert(
+      files.contains(passFixture + "/tests/test_greeting.py"),
+      "project source did not include its own test file",
+    )
+    assert(
+      files.contains(nestedFixture + "/parent.py") == false,
+      "project source included a file from another project",
+    )
+
+    assert(
+      project.exclude.contains("**/.venv/**") and project.exclude.contains("**/__pycache__/**"),
+      "the default exclude list lost a never-mounted path",
+    )
+    assert(
+      lib.project(ws, venvFixture).source(ws).glob("**/.venv/**").isEmpty,
+      "project source mounted a virtualenv",
+    )
+
+    let withExtra = pyproject(markers: ["pyproject.toml"], includeExtraFiles: ["LICENSE"])
+      .project(ws, passFixture)
+    assert(
+      withExtra.include.contains("LICENSE"),
+      "include did not carry the inherited extra files",
+    )
+    assert(
+      withExtra.source(ws).file("LICENSE").contents.contains("Apache License"),
+      "project source did not mount an extra include file",
+    )
+
+    assert(project.hasFile(ws, "pyproject.toml"), "a project did not find its own marker")
+    assert(project.hasFile(ws, "uv.lock") == false, "a project without a uv.lock reported one")
+    null
+  }
+
+  """
+  A tool version is resolved from what the project pins, so a check does not
+  start failing on the day the tool ships a new release.
+  """
+  toolVersionCheck(ws: Workspace!): Void @check {
+    # uv.lock wins over required-version: the lock is what the project resolves.
+    let pinned = lib.project(ws, pinnedFixture)
+    assert(
+      pinned.toolVersion(ws, "mypy") == "1.11.2",
+      "uv.lock did not win over required-version: " + (pinned.toolVersion(ws, "mypy") ?? "<null>"),
+    )
+
+    # A uv workspace member can carry the tool's own name; it is not the tool.
+    assert(
+      lib.project(ws, regenerateFixture).toolVersion(ws, "project-regenerate") == null,
+      "a local uv.lock member was read as a resolved tool version",
+    )
+
+    let required = lib.project(ws, requiredFixture)
+    assert(
+      required.toolVersion(ws, "mypy") == "1.10.0",
+      "required-version was not read from pyproject.toml: " +
+        (required.toolVersion(ws, "mypy") ?? "<null>"),
+    )
+    assert(
+      required.toolVersion(ws, "pytest") == null,
+      "a tool section without required-version reported one",
+    )
+
+    let ruffToml = pyproject(markers: ["ruff.toml"]).project(ws, ruffTomlFixture)
+    assert(
+      ruffToml.toolVersion(ws, "ruff") == "0.6.9",
+      "required-version was not read from ruff.toml: " +
+        (ruffToml.toolVersion(ws, "ruff") ?? "<null>"),
+    )
+
+    assert(
+      lib.project(ws, passFixture).toolVersion(ws, "mypy") == null,
+      "a project pinning nothing reported a version",
+    )
+    null
+  }
+}

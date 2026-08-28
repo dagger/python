@@ -7,5 +7,11 @@ name = "dang"
 [[modules.dagger-dang-sdk.as-sdk.modules]]
 path = "pyproject"
 
+[[modules.dagger-dang-sdk.as-sdk.modules]]
+path = ".dagger/modules/e2e"
+
 [modules.pyproject]
 source = "pyproject"
+
+[modules.e2e]
+source = ".dagger/modules/e2e"
