@@ -120,10 +120,13 @@ type Ty {
 
   let checkContainer(ws: Workspace!, path: String!): Container! {
     let project = lib.project(ws, path, findUp: false)
+    let packages = ["ty==" + versionFor(ws, path)]
+    # The environment comes from the library, so the `uv sync` layer underneath
+    # is the same one pytest and the other checker get.
     project
-      .container(ws)
+      .env(ws, with: packages)
       .withExec(
-        ["uv", "run", "--with", "ty==" + versionFor(ws, path), "ty", "check"] +
+        ["uv", "run"] + project.withFlags(packages) + ["ty", "check"] +
           project.excludeNestedFlags(ws, "--exclude", regex: false),
       )
   }

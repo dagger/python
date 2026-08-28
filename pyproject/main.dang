@@ -393,6 +393,41 @@ type PythonProject {
   }
 
   """
+  Container with this project's dependencies installed.
+
+  This is the one environment the tools that need a Python runtime share. Ask
+  for it with no extra packages and pytest, mypy and ty all get the same
+  container, so a single `uv sync` serves three checks instead of three.
+
+  mypy and ty need it because a checker that cannot see the installed packages
+  cannot resolve third-party imports, and reports errors that are not real.
+
+  `with` names extra packages the caller needs on top of the project's own.
+  They are resolved against the project's dependencies in the same pass, not
+  installed over the top of a finished environment: installing afterwards is
+  what gave a `dagger/pytest` user a dependency conflict that nothing caught.
+  A conflict now fails here, while building the environment.
+  """
+  pub env(ws: Workspace!, with: [String!]! = []): Container! {
+    let synced = container(ws).withExec(["uv", "sync"])
+    if (with.isEmpty) {
+      synced
+    } else {
+      synced.withExec(["uv", "run"] + withFlags(with) + ["python", "-c", ""])
+    }
+  }
+
+  """
+  `--with` flags naming extra packages for a uv invocation.
+
+  A caller runs its own command with the same flags, against the resolution
+  `env` already made and cached.
+  """
+  pub withFlags(packages: [String!]!): [String!]! {
+    packages.reduce([]) { flags, package => flags + ["--with", package] }
+  }
+
+  """
   Command-line flags that keep this project's nested projects out of a tool
   run, given the flag that tool spells exclusions with.
 

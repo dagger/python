@@ -118,10 +118,13 @@ type Mypy {
 
   let checkContainer(ws: Workspace!, path: String!): Container! {
     let project = lib.project(ws, path, findUp: false)
+    let packages = ["mypy==" + versionFor(ws, path)]
+    # The environment comes from the library, so the `uv sync` layer underneath
+    # is the same one pytest and the other checker get.
     project
-      .container(ws)
+      .env(ws, with: packages)
       .withExec(
-        ["uv", "run", "--with", "mypy==" + versionFor(ws, path), "mypy", "."] +
+        ["uv", "run"] + project.withFlags(packages) + ["mypy", "."] +
           project.excludeNestedFlags(ws, "--exclude", regex: true),
       )
   }

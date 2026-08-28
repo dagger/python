@@ -612,4 +612,42 @@ type E2e {
     uv(audit: ["**", "!" + lockDriftFixture]).auditAll(ws)
     null
   }
+
+  """
+  The shared environment is one container, and extra packages land in it.
+
+  mypy, ty and pytest all ask the library for the same environment, so the
+  `uv sync` underneath them is built once rather than once per tool. Asking
+  twice must give the same address, or nothing is being shared.
+  """
+  envCheck(ws: Workspace!): Void @check {
+    let project = lib.project(ws, passFixture)
+
+    let first = project.env(ws)
+    let second = lib.project(ws, passFixture).env(ws)
+    assert(
+      first.id == second.id,
+      "the shared environment was rebuilt instead of reused",
+    )
+
+    # The project itself does not depend on packaging; the extra does.
+    let bare = {
+      project.env(ws).withExec(["uv", "run", "python", "-c", "import packaging"]).sync
+      "the project environment already had the extra package"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      bare.contains("exit code"),
+      "a package nobody asked for was already in the environment: " + bare,
+    )
+
+    let withExtra = project.env(ws, with: ["packaging"])
+    withExtra
+      .withExec(["uv", "run"] + project.withFlags(["packaging"]) +
+        ["python", "-c", "import packaging"])
+      .sync
+    null
+  }
+
 }
