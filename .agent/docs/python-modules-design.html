@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design: Dagger modules for Python</title>
+<style>
+  :root {
+    --ink: #14181f;
+    --ink-soft: #5a6472;
+    --line: #dfe4ea;
+    --bg: #ffffff;
+    --panel: #f6f8fa;
+    --accent: #2f6f4f;
+    --warn: #8a5a1a;
+    --stop: #9b2c2c;
+    --code-bg: #f2f4f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ink: #e6e9ee;
+      --ink-soft: #9aa4b2;
+      --line: #2c333d;
+      --bg: #12161c;
+      --panel: #1a2027;
+      --accent: #6fbf95;
+      --warn: #d9a441;
+      --stop: #e08585;
+      --code-bg: #1e242c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 3rem 1.5rem 6rem;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 60rem; margin: 0 auto; }
+  h1 { font-size: 1.9rem; line-height: 1.25; margin: 0 0 .4rem; letter-spacing: -.015em; }
+  h2 {
+    font-size: 1.2rem; margin: 3rem 0 .9rem; padding-top: 1.2rem;
+    border-top: 1px solid var(--line); letter-spacing: -.01em;
+  }
+  h3 { font-size: 1rem; margin: 1.8rem 0 .5rem; }
+  p, li { margin: .55rem 0; }
+  .sub { color: var(--ink-soft); font-size: .92rem; margin: 0 0 2rem; }
+  .lede { font-size: 1.05rem; }
+  code, kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .875em; background: var(--code-bg);
+    padding: .12em .38em; border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 1rem 1.1rem; overflow-x: auto; font-size: .84rem; line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; font-size: 1em; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .93rem; }
+  th, td { text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; color: var(--ink-soft); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: none; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 1rem 1.2rem; margin: 1.2rem 0;
+  }
+  .panel > :first-child { margin-top: 0; }
+  .panel > :last-child { margin-bottom: 0; }
+  .tag {
+    display: inline-block; font-size: .72rem; font-weight: 600; letter-spacing: .04em;
+    text-transform: uppercase; padding: .16em .5em; border-radius: 4px;
+    border: 1px solid currentColor; white-space: nowrap;
+  }
+  .yes { color: var(--accent); }
+  .no  { color: var(--ink-soft); }
+  .hot { color: var(--stop); }
+  .mid { color: var(--warn); }
+  .rule { font-weight: 600; }
+  ol.stages { padding-left: 0; list-style: none; counter-reset: st; }
+  ol.stages > li {
+    counter-increment: st; position: relative;
+    padding: 0 0 1.4rem 2.6rem; margin: 0;
+    border-left: 2px solid var(--line); margin-left: .8rem;
+  }
+  ol.stages > li:last-child { border-left-color: transparent; padding-bottom: 0; }
+  ol.stages > li::before {
+    content: counter(st); position: absolute; left: -.85rem; top: 0;
+    width: 1.7rem; height: 1.7rem; border-radius: 50%;
+    background: var(--bg); border: 2px solid var(--line);
+    display: grid; place-items: center; font-size: .8rem; font-weight: 700;
+  }
+  ol.stages h3 { margin-top: .1rem; }
+  figure { margin: 1.5rem 0; }
+  figcaption { color: var(--ink-soft); font-size: .85rem; margin-top: .6rem; }
+  svg { max-width: 100%; height: auto; display: block; }
+  .foot { color: var(--ink-soft); font-size: .85rem; margin-top: 3rem; border-top: 1px solid var(--line); padding-top: 1rem; }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Design: Dagger modules for Python</h1>
+<p class="sub">Draft &middot; 2026-08-28 &middot; Written in ASD-STE100 Simplified Technical English</p>
+
+<p class="lede">This document tells you how to divide the Python tools into Dagger modules. It also tells you which repositories to make. Each statement below has a test result or a source.</p>
+
+<h2>1. The problem</h2>
+
+<p>Go has one module, because Go has one toolchain from one supplier. Python is different. Python has many tools from many suppliers. Each tool has its own release dates and its own configuration.</p>
+
+<p>Two modules are live today: <code>dagger/ruff</code> and <code>dagger/pytest</code>. Both find Python projects, but each one does it differently. A third module makes a third method. This causes three problems:</p>
+
+<ul>
+  <li>Each module has a different opinion about the location of a Python project.</li>
+  <li>You must set <q>do not check <code>examples/</code></q> one time for each module.</li>
+  <li>Each module builds its own container, so no module shares the work.</li>
+</ul>
+
+<h2>2. Rules for the design</h2>
+
+<table>
+  <thead><tr><th>Rule</th><th>Reason</th></tr></thead>
+  <tbody>
+    <tr><td class="rule">One tool, one module.</td><td>Each tool has its own release dates and its own options. A user can install only the tools that the user needs.</td></tr>
+    <tr><td class="rule">The shared library has no check functions.</td><td>Two modules with a check for the same tool cause two runs of that tool. We saw this problem in a test.</td></tr>
+    <tr><td class="rule">Each tool keeps its own marker files. The library keeps the policy.</td><td>A <code>ruff.toml</code> directory is a ruff project. It is not a pytest project. The difference is correct.</td></tr>
+    <tr><td class="rule">Do not put a Python environment where the tool does not need one.</td><td>Ruff needs no Python. An environment makes ruff slow and gives no result.</td></tr>
+  </tbody>
+</table>
+
+<h2>3. Which tools need a Python environment</h2>
+
+<p>This is the most important division. It is not <q>Python tool</q> against <q>other tool</q>. It is <q>the tool must see the installed packages</q> against <q>the tool reads only the source text</q>.</p>
+
+<p>The test used one file. The file imports <code>attrs</code> and has one true error (<code>p.x + "oops"</code>).</p>
+
+<table>
+  <thead><tr><th>Tool</th><th>Without the environment</th><th>With the environment</th><th>Needs it?</th></tr></thead>
+  <tbody>
+    <tr><td><code>ruff</code></td><td><code>All checks passed!</code></td><td>The same result</td><td><span class="tag no">No</span></td></tr>
+    <tr><td><code>mypy</code></td><td><code>Found 4 errors</code> &mdash; 3 are false</td><td><code>Found 1 error</code></td><td><span class="tag hot">Yes</span></td></tr>
+    <tr><td><code>ty</code></td><td><code>Cannot resolve attrs</code></td><td>The true error</td><td><span class="tag hot">Yes</span></td></tr>
+    <tr><td><code>pytest</code></td><td>It imports your code</td><td>&mdash;</td><td><span class="tag hot">Yes</span></td></tr>
+    <tr><td><code>uv</code></td><td>It makes the environment</td><td>&mdash;</td><td><span class="tag no">No</span></td></tr>
+  </tbody>
+</table>
+
+<div class="panel">
+  <p><strong>Result.</strong> If mypy or ty do not see the packages, they report false errors. A false error is worse than no check. But ruff gives the same result with no Python at all.</p>
+</div>
+
+<h2>4. The two layers</h2>
+
+<figure>
+<svg viewBox="0 0 900 400" role="img" aria-label="Layer diagram of the Python modules">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <style>
+      .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.5; }
+      .lbl { fill: var(--ink); font: 600 14px ui-sans-serif, system-ui, sans-serif; text-anchor: middle; }
+      .sm  { fill: var(--ink-soft); font: 11px ui-sans-serif, system-ui, sans-serif; text-anchor: middle; }
+      .ttl { fill: var(--ink-soft); font: 600 11px ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; }
+      .ln  { stroke: var(--line); stroke-width: 1.5; fill: none; color: var(--line); }
+      .env { stroke: var(--warn); }
+      .envtxt { fill: var(--warn); font: 600 10px ui-sans-serif, system-ui, sans-serif; text-anchor: middle; }
+    </style>
+  </defs>
+
+  <text class="ttl" x="14" y="26">TOOL MODULES &mdash; EACH ONE HAS CHECKS</text>
+
+  <g>
+    <rect class="box" x="14"  y="42" width="158" height="62" rx="9"/>
+    <text class="lbl" x="93"  y="70">ruff</text>
+    <text class="sm"  x="93"  y="89">lint &middot; format</text>
+
+    <rect class="box" x="190" y="42" width="158" height="62" rx="9"/>
+    <text class="lbl" x="269" y="70">uv</text>
+    <text class="sm"  x="269" y="89">lock &middot; build &middot; audit</text>
+
+    <rect class="box" x="366" y="42" width="158" height="62" rx="9"/>
+    <text class="lbl" x="445" y="70">pytest</text>
+    <text class="sm"  x="445" y="89">tests &middot; OTel traces</text>
+
+    <rect class="box" x="542" y="42" width="158" height="62" rx="9"/>
+    <text class="lbl" x="621" y="70">mypy</text>
+    <text class="sm"  x="621" y="89">type check</text>
+
+    <rect class="box" x="718" y="42" width="158" height="62" rx="9"/>
+    <text class="lbl" x="797" y="70">ty</text>
+    <text class="sm"  x="797" y="89">type check</text>
+  </g>
+
+  <g class="ln">
+    <path d="M93 104 V150 H445" marker-end="url(#a)" style="color:var(--line)"/>
+    <path d="M269 104 V132" />
+    <path d="M621 104 V132" />
+    <path d="M797 104 V132" />
+  </g>
+
+  <line class="ln" x1="93" y1="104" x2="93" y2="196"/>
+  <line class="ln" x1="269" y1="104" x2="269" y2="196"/>
+  <line class="ln" x1="445" y1="104" x2="445" y2="196"/>
+  <line class="ln" x1="621" y1="104" x2="621" y2="196"/>
+  <line class="ln" x1="797" y1="104" x2="797" y2="196"/>
+
+  <rect class="box env" x="366" y="140" width="510" height="34" rx="8" fill="none" stroke-dasharray="5 4"/>
+  <text class="envtxt" x="621" y="161">these three also use env() &mdash; one container, shared and cached</text>
+
+  <rect class="box" x="14" y="196" width="862" height="86" rx="10"/>
+  <text class="ttl" x="34" y="222">SHARED LIBRARY &mdash; NO CHECKS</text>
+  <text class="lbl" x="445" y="248" style="font-size:15px">dagger/python/pyproject</text>
+  <text class="sm"  x="445" y="268">projects(ws, markers) &middot; source &middot; include &middot; exclude &middot; nestedProjects &middot; selection &middot; version &middot; env</text>
+
+  <line class="ln" x1="445" y1="282" x2="445" y2="318"/>
+  <rect class="box" x="234" y="318" width="422" height="52" rx="9"/>
+  <text class="lbl" x="445" y="342">Dagger engine</text>
+  <text class="sm"  x="445" y="360">Workspace.findRoots &middot; Container &middot; Changeset</text>
+</svg>
+<figcaption>Every tool module uses the library to find projects. Only pytest, mypy and ty use <code>env()</code>.</figcaption>
+</figure>
+
+<h2>5. The repositories to make</h2>
+
+<p>Make <strong>one</strong> repository, not five. Put one module in each directory. A user can install one module from a subdirectory. We tested this method:</p>
+
+<pre><code>$ dagger install github.com/typesafe-ai/daggerverse/deptry
+Installed module "deptry" in /tmp/subpath/dagger.toml</code></pre>
+
+<h3>Proposed layout</h3>
+
+<pre><code>github.com/dagger/python
+├── pyproject/     the shared library. No checks.
+├── uv/            uv lock, uv build, uv audit
+├── mypy/          type check with mypy
+├── ty/            type check with ty
+└── .dagger/       one set of end-to-end tests for all modules</code></pre>
+
+<p>The user installs only what the user needs:</p>
+
+<pre><code>dagger install github.com/dagger/ruff                 # lint, format
+dagger install github.com/dagger/pytest               # tests
+dagger install github.com/dagger/python/uv            # lock, build, audit
+dagger install github.com/dagger/python/mypy          # types</code></pre>
+
+<h3>Why one repository</h3>
+
+<table>
+  <thead><tr><th>Point</th><th>One repository</th><th>Five repositories</th></tr></thead>
+  <tbody>
+    <tr><td>Library version</td><td>Always correct. The library and its users change together.</td><td>Five pins to move for each library change.</td></tr>
+    <tr><td>A library fault</td><td>One commit repairs all modules.</td><td>Five releases, in the correct order.</td></tr>
+    <tr><td>Test fixtures</td><td>One <code>testdata/</code> tree for all modules.</td><td>One copy in each repository.</td></tr>
+    <tr><td>CI and release</td><td>One of each.</td><td>Five of each.</td></tr>
+    <tr><td>User install</td><td>The same. One module at a time.</td><td>The same.</td></tr>
+    <tr><td>Precedent</td><td>New for the dagger organization.</td><td>Same as <code>dagger/go</code>, <code>ruff</code>, <code>pytest</code>.</td></tr>
+  </tbody>
+</table>
+
+<p>Keep <code>dagger/ruff</code> and <code>dagger/pytest</code> where they are now. Users have them already. Let them use the published library. Move them later only if there is a good reason.</p>
+
+<div class="panel">
+  <p><strong>Note on the name.</strong> The library is not a toolchain, but <code>dagger/go</code> is a toolchain. Do not make <code>dagger/python</code> a toolchain now. Solomon said: <q>we can always add a higher-level wrapper on top if we want later</q>. The repository name keeps that door open.</p>
+</div>
+
+<h3>Do we need <code>dagger/pip</code>?</h3>
+
+<p><strong>No.</strong> There are three reasons:</p>
+
+<ul>
+  <li><code>uv pip</code> replaces pip. We installed a <code>requirements.txt</code> project with <code>uv pip install -r</code>. The result had no pip in it.</li>
+  <li>pip has no verbs of its own. Every other module gives a check or a generate. There is no <code>dagger check</code> for pip.</li>
+  <li>The pip code in <code>dagger/pytest</code> is not for pip projects. Its <code>resolveRunner</code> tests <em>the container</em> for uv. The pip path is for a container that the user supplies without uv.</li>
+</ul>
+
+<p>Therefore pip is an install method inside <code>env()</code>. It is not a module.</p>
+
+<h3>Do <code>mypy</code> and <code>ty</code> need two modules?</h3>
+
+<p>Yes, but this is the weakest recommendation in this document. The two tools use different pattern languages for the same flag. Mypy <code>--exclude</code> takes a regular expression. Ty <code>--exclude</code> takes a glob. A directory named <code>sdk-v1.2</code> needs two different escape functions. The configuration sections also differ, and ty is still before version 1.0.</p>
+
+<p>The other option is one module with a <code>typeChecker</code> setting. The current code does this in about 15 lines. That option is legitimate. It costs less scaffolding but it hides two different tools behind one name.</p>
+
+<h2>6. The library interface</h2>
+
+<pre><code>type Pyproject {
+  # Discovery. The caller gives the markers; the library gives the policy.
+  pub projects(ws: Workspace!, markers: [String!]!): [PythonProject!]!
+  pub project(ws: Workspace!, path: String!, findUp: Boolean!): PythonProject!
+}
+
+type PythonProject {
+  pub path: String!
+  pub source(ws: Workspace!): Directory!      # include, exclude, nested projects
+  pub nestedProjects(ws: Workspace!): [String!]!
+  pub selected(patterns: [String!]!): Boolean!
+  pub toolVersion(ws: Workspace!, tool: String!): String   # uv.lock, required-version
+  pub env(ws: Workspace!, with: [String!]!): Container!    # source and dependencies
+}</code></pre>
+
+<p>The <code>with</code> argument is important. <code>dagger/pytest</code> installs <code>pytest_otel</code> after <code>uv sync</code>. This caused dependency conflicts for a user. The library must resolve the extra packages in the same pass.</p>
+
+<h2>7. Known problems</h2>
+
+<table>
+  <thead><tr><th>Problem</th><th>Status</th><th>What to do</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><strong>Only one failure is reported.</strong> Three projects failed. The check reported one.</td>
+      <td><span class="tag hot">Open</span></td>
+      <td>Tell the Dagger team. The fault is in <code>dagger/go</code>, <code>ruff</code>, <code>pytest</code> and the new code. See below.</td>
+    </tr>
+    <tr>
+      <td><strong>Tool versions float.</strong> <code>uv run --with mypy</code> gives the newest mypy on that day.</td>
+      <td><span class="tag mid">Repair</span></td>
+      <td>Read the version from <code>uv.lock</code>, then from <code>required-version</code>, then use a default.</td>
+    </tr>
+    <tr>
+      <td><strong><code>UV_COMPILE_BYTECODE</code> gives unstable <code>.pyc</code> files.</strong></td>
+      <td><span class="tag mid">Watch</span></td>
+      <td>The new code does not set it. If <code>env()</code> sets it, the container is not stable and the cache is of no use.</td>
+    </tr>
+    <tr>
+      <td><strong><code>pytest_otel</code> is not on PyPI.</strong></td>
+      <td><span class="tag mid">Known</span></td>
+      <td>Publish it. Then <code>env(with:)</code> can resolve it with the other packages.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>The failure-report problem, in detail</h3>
+
+<p>The modules run the projects in parallel. This part is correct. Three tests of 6 seconds each took 6.8 seconds.</p>
+
+<p>But the modules merge the results into one directory and then call <code>sync</code>. The first error stops all the reports. You repair one project, run again, and find the next one.</p>
+
+<p>We tested the obvious repair. It collects the exit codes with <code>expect: ReturnType.ANY</code>. It reports all three failures, but it loses the parallel run:</p>
+
+<table>
+  <thead><tr><th>Method</th><th>Reports</th><th>Time (3 &times; 6 s)</th></tr></thead>
+  <tbody>
+    <tr><td><code>reduce</code> and <code>sync</code> (now)</td><td>1 of 3</td><td><strong>6.8 s</strong></td></tr>
+    <tr><td>Collect the exit codes</td><td>3 of 3</td><td><strong>19.6 s</strong></td></tr>
+    <tr><td>Both methods together</td><td>3 of 3</td><td>23.7 s &mdash; it did not work</td></tr>
+  </tbody>
+</table>
+
+<p>Dang has no structured concurrency. The Python SDK has <code>anyio.create_task_group()</code>, and the <code>deptry</code> module of typesafe-ai uses it to get both results. Dang needs the same thing. Do not repair this one module at a time.</p>
+
+<h2>8. The plan, in three stages</h2>
+
+<ol class="stages">
+  <li>
+    <h3>Make the library and prove it</h3>
+    <p>Make <code>github.com/dagger/python</code> with the <code>pyproject/</code> module. Put in discovery, selection, source policy and version detection. Do not put in <code>env()</code> yet.</p>
+    <p>Then move <code>dagger/ruff</code> and <code>dagger/pytest</code> onto it. Two users prove the interface. This also repairs the two known faults: the different exclude lists, and the <code>pytest:test-all</code> exit code 5 on a project with no tests.</p>
+  </li>
+  <li>
+    <h3>Add the tool modules</h3>
+    <p>Add <code>uv/</code>, <code>mypy/</code> and <code>ty/</code> to the same repository. Take the code from the module that is ready now. Add <code>uv audit</code>, because no module gives a security check today.</p>
+  </li>
+  <li>
+    <h3>Add the environment</h3>
+    <p>Add <code>env()</code> to the library. Remove the environment code from <code>dagger/pytest</code>. Then <code>mypy</code> and <code>ty</code> become very small: one base image and one command.</p>
+    <p>All three tools then build the same container. Dagger gives it one address, so one <code>uv sync</code> serves three checks.</p>
+  </li>
+</ol>
+
+<h2>9. Decisions against</h2>
+
+<table>
+  <thead><tr><th>Do not do this</th><th>Reason</th></tr></thead>
+  <tbody>
+    <tr><td>Do not make <code>dagger/pip</code>.</td><td><code>uv pip</code> does the work. pip has no verbs.</td></tr>
+    <tr><td>Do not run ruff through uv.</td><td>Ruff gives the same result with no Python. An environment only makes it slow.</td></tr>
+    <tr><td>Do not make one large <code>dagger/python</code> toolchain now.</td><td>It must follow four suppliers. A user cannot take only one part of it.</td></tr>
+    <tr><td>Do not give the library check functions.</td><td>Two checks then run the same tool. We saw this with <code>python:test-all</code> and <code>pytest:test-all</code>.</td></tr>
+    <tr><td>Do not make a fixed marker list in the library.</td><td>Ruff and pytest have different, correct opinions about a project.</td></tr>
+  </tbody>
+</table>
+
+<h2>10. Sources</h2>
+
+<ul>
+  <li>Discord: Yves, Solomon and danielgafni, 2026-08-25.</li>
+  <li><code>github.com/typesafe-ai/daggerverse</code> &mdash; the <code>uv</code>, <code>ruff</code> and <code>deptry</code> modules.</li>
+  <li><code>astral-sh/uv</code> issue 10619 &mdash; unstable bytecode.</li>
+  <li>Local tests on Dagger v1.0.0-beta.10, with a live engine.</li>
+</ul>
+
+<p class="foot">All test results in this document come from commands that ran on this machine. The measurements are wall-clock times from <code>dagger check</code>.</p>
+
+</main>
+</body>
+</html>
