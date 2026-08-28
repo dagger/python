@@ -1,0 +1,128 @@
+pub description = "Static type checking for Python projects, powered by mypy"
+
+"""
+mypy over every Python project in a workspace.
+
+mypy runs inside the project's environment on purpose. Without the installed
+packages it cannot resolve third-party imports and reports errors that are not
+real, and a false error is worse than no check at all.
+
+The version is resolved from what the project pins rather than from whatever
+shipped this morning. See `github.com/dagger/python/ty` for Astral's checker.
+
+https://dagger.io
+https://mypy-lang.org
+"""
+type Mypy {
+  """
+  Files whose presence makes a directory a project mypy should check.
+  """
+  let markers: [String!]! = ["pyproject.toml"]
+
+  """
+  Python version used for the default base image. Null when a custom base is set.
+  """
+  pub version: String {
+    lib.version
+  }
+
+  """
+  Project roots to check ("!" excludes; see the `scope` constructor argument).
+  """
+  pub scope: [String!]! = ["**"]
+
+  """
+  mypy version used for a project that pins none of its own.
+
+  Pinned rather than floating: `uv run --with mypy` resolves to whichever mypy
+  is newest on the day it runs, so a check starts failing on a day nobody
+  touched any code.
+  """
+  pub defaultVersion: String! = "1.18.2"
+
+  let pythonVersion: String
+  let base: Container
+
+  new(
+    """
+    Python version used for the default base image. Mutually exclusive with base.
+    """
+    version: String = null,
+    """
+    Base image for every mypy container. Expected to provide a Python
+    interpreter and uv on PATH. Mutually exclusive with version.
+    """
+    base: Container = null,
+    """
+    Project roots to check. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
+    checks everything but docs.
+    """
+    scope: [String!]! = ["**"],
+    """
+    mypy version used for a project that pins none of its own.
+    """
+    defaultVersion: String! = "1.18.2",
+  ) {
+    self.pythonVersion = version
+    self.base = base
+    self.scope = scope
+    self.defaultVersion = defaultVersion
+    self
+  }
+
+  let lib: Pyproject! {
+    pyproject(markers: markers, version: pythonVersion, base: base)
+  }
+
+  """
+  Type check every discovered project that holds Python source of its own.
+  """
+  pub checkAll(ws: Workspace!): Void @check {
+    # FIXME: aggregating into one directory and syncing reports only the first
+    # failure. The fix belongs in Dang, which has no structured concurrency
+    # primitive; dagger/go, ruff and pytest all carry this same shape.
+    lib
+      .projects(ws)
+      .{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
+      .filter { project => project.within and project.chosen and project.sources }
+      .map { project => project.path }
+      .reduce(directory) { layers, path =>
+        layers.withDirectory(
+          path,
+          directory.withFile("pyproject.toml", checkContainer(ws, path).file("pyproject.toml")),
+        )
+      }
+      .sync
+    null
+  }
+
+  """
+  Type check one project. A project the caller deselected, or one holding no
+  Python source of its own, is not checked.
+  """
+  pub checkProject(ws: Workspace!, path: String!): Void {
+    let project = lib.project(ws, path)
+    if (project.selected(scope) and project.hasOwnFiles(ws, ["**/*.py"])) {
+      checkContainer(ws, project.path).sync
+    }
+    null
+  }
+
+  """
+  The mypy version used for a project: what it pins, else the default.
+  """
+  pub versionFor(ws: Workspace!, path: String!): String! {
+    lib.project(ws, path).toolVersion(ws, "mypy") ?? defaultVersion
+  }
+
+  let checkContainer(ws: Workspace!, path: String!): Container! {
+    let project = lib.project(ws, path, findUp: false)
+    project
+      .container(ws)
+      .withExec(
+        ["uv", "run", "--with", "mypy==" + versionFor(ws, path), "mypy", "."] +
+          project.excludeNestedFlags(ws, "--exclude", regex: true),
+      )
+  }
+}

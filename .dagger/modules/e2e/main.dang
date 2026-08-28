@@ -390,4 +390,226 @@ type E2e {
     )
     null
   }
+  let typeFailFixture: String! = "testdata/project-type-fail"
+  let excludedFixture: String! = "testdata/project-excluded"
+  let buildFixture: String! = "testdata/project-build"
+  let lockDriftFixture: String! = "testdata/project-lock-drift"
+
+  """
+  Fixtures that are broken on purpose, left out so the aggregate checks
+  describe a healthy workspace.
+  """
+  let healthy: [String!]! = [
+    "**",
+    "!" + typeFailFixture,
+    "!" + nestedChildFixture,
+    "!" + metacharFixture,
+    "!" + excludedFixture,
+  ]
+
+  let mypyFailure(ws: Workspace!, path: String!): String! {
+    { mypy(scope: ["**"]).checkProject(ws, path); "mypy passed a type error" } rescue {
+      err: Error => err.message
+    }
+  }
+
+  let tyFailure(ws: Workspace!, path: String!): String! {
+    { ty(scope: ["**"]).checkProject(ws, path); "ty passed a type error" } rescue {
+      err: Error => err.message
+    }
+  }
+
+  """
+  mypy checks a healthy workspace, really fails on a type error, and skips a
+  project with no Python source of its own.
+  """
+  mypyCheck(ws: Workspace!): Void @check {
+    mypy(scope: healthy).checkAll(ws)
+
+    let failure = mypyFailure(ws, typeFailFixture)
+    assert(
+      failure.contains("exit code"),
+      "mypy did not fail on a type error: " + failure,
+    )
+
+    # An aggregate that quietly selected nothing would pass the call above, so
+    # point it at the project that fails and require the failure to surface.
+    let aggregate = {
+      mypy(scope: [typeFailFixture]).checkAll(ws)
+      "checkAll skipped the failing project it selected"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      aggregate.contains("exit code"),
+      "checkAll did not run the failing project it selected: " + aggregate,
+    )
+
+    # A deselected project is not checked even though it is broken.
+    mypy(scope: ["**", "!" + typeFailFixture]).checkProject(ws, typeFailFixture)
+
+    # No Python source of its own, so nothing to check.
+    mypy().checkProject(ws, deepFixture)
+    null
+  }
+
+  """
+  A nested project is checked on its own and never by its parent, and the
+  exclusion names the exact directory rather than a pattern that matches it.
+
+  "sub.v2" is a nested project and must be excluded from its parent's run;
+  "subXv2" is an ordinary sibling holding a type error and must still be
+  caught. An unescaped exclusion matches both, so a passing parent here would
+  mean the sibling's error was silently dropped.
+  """
+  nestedExcludeCheck(ws: Workspace!): Void @check {
+    # The child's module is mistyped; the parent must still pass.
+    mypy().checkProject(ws, nestedFixture)
+    ty().checkProject(ws, nestedFixture)
+
+    let childFailure = mypyFailure(ws, nestedChildFixture)
+    assert(
+      childFailure.contains("exit code"),
+      "the nested child's type error was not caught on its own: " + childFailure,
+    )
+
+    let mypyMetachar = mypyFailure(ws, metacharFixture)
+    assert(
+      mypyMetachar.contains("exit code"),
+      "mypy over-matched a dotted nested project exclusion: " + mypyMetachar,
+    )
+
+    let tyMetachar = tyFailure(ws, metacharFixture)
+    assert(
+      tyMetachar.contains("exit code"),
+      "ty over-matched a dotted nested project exclusion: " + tyMetachar,
+    )
+
+    let nestedFailure = mypyFailure(ws, metacharNestedFixture)
+    assert(
+      nestedFailure.contains("exit code"),
+      "the dotted nested project was never checked on its own: " + nestedFailure,
+    )
+    null
+  }
+
+  """
+  ty reaches the same verdicts as mypy on the same fixtures.
+  """
+  tyCheck(ws: Workspace!): Void @check {
+    ty(scope: healthy).checkAll(ws)
+
+    let failure = tyFailure(ws, typeFailFixture)
+    assert(
+      failure.contains("exit code"),
+      "ty did not fail on a type error: " + failure,
+    )
+    null
+  }
+
+  """
+  A tool runs the version the project pins, and its own default otherwise.
+  """
+  toolPinCheck(ws: Workspace!): Void @check {
+    assert(
+      mypy().versionFor(ws, pinnedFixture) == "1.11.2",
+      "mypy did not take the version pinned in uv.lock: " +
+        mypy().versionFor(ws, pinnedFixture),
+    )
+    assert(
+      mypy().versionFor(ws, passFixture) == mypy().defaultVersion,
+      "an unpinned project did not fall back to the module default",
+    )
+    assert(
+      mypy(defaultVersion: "1.17.1").versionFor(ws, passFixture) == "1.17.1",
+      "the module default version was not configurable",
+    )
+    assert(
+      ty().versionFor(ws, passFixture) == ty().defaultVersion,
+      "ty did not fall back to its own default",
+    )
+    null
+  }
+
+  """
+  A stale uv.lock is reported as modified and the changeset carries the
+  refreshed contents; a lockfile that is already current reports nothing.
+
+  The changeset baseline is the project's real source, so a second run has to
+  see the lockfile the first one produced. A baseline that read as empty would
+  report the lockfile as newly added forever.
+  """
+  uvLockCheck(ws: Workspace!): Void @check {
+    let drifted = uv().lockProject(ws, lockDriftFixture)
+    assert(
+      drifted.modifiedPaths.contains(lockDriftFixture + "/uv.lock"),
+      "a stale uv.lock was not reported as modified: " +
+        (drifted.modifiedPaths + drifted.addedPaths).join(", "),
+    )
+    assert(
+      drifted.layer.file(lockDriftFixture + "/uv.lock").contents
+        .contains("requires-python = \">=3.12\""),
+      "the refreshed uv.lock did not pick up the new requires-python",
+    )
+
+    let driftedAll = uv(lock: [lockDriftFixture]).lockAll(ws)
+    assert(
+      driftedAll.modifiedPaths.contains(lockDriftFixture + "/uv.lock"),
+      "lockAll did not re-lock the drifted project it selected: " +
+        (driftedAll.modifiedPaths + driftedAll.addedPaths).join(", "),
+    )
+
+    let current = uv().lockProject(ws, regenerateFixture)
+    assert(
+      current.addedPaths.isEmpty and current.modifiedPaths.isEmpty and
+        current.removedPaths.isEmpty,
+      "re-locking an up-to-date project reported changes: " +
+        (current.addedPaths + current.modifiedPaths + current.removedPaths).join(", "),
+    )
+
+    let unlocked = uv().lockProject(ws, passFixture)
+    assert(
+      unlocked.addedPaths.isEmpty and unlocked.modifiedPaths.isEmpty,
+      "locking a project without a uv.lock created one",
+    )
+
+    let skipped = uv(lock: ["!" + lockDriftFixture]).lockProject(ws, lockDriftFixture)
+    assert(
+      skipped.addedPaths.isEmpty and skipped.modifiedPaths.isEmpty,
+      "a deselected project was locked anyway",
+    )
+
+    let all = uv(lock: ["**", "!" + lockDriftFixture]).lockAll(ws)
+    assert(
+      all.addedPaths.isEmpty and all.modifiedPaths.isEmpty and all.removedPaths.isEmpty,
+      "lockAll rewrote up-to-date lockfiles: " +
+        (all.addedPaths + all.modifiedPaths + all.removedPaths).join(", "),
+    )
+    null
+  }
+
+  """
+  Packaging produces a wheel and an sdist for a project with a build backend.
+  """
+  uvBuildCheck(ws: Workspace!): Void @check {
+    let dist = uv().build(ws, buildFixture).entries
+    assert(
+      dist.contains("project_build-0.2.0-py3-none-any.whl"),
+      "uv build did not produce the expected wheel: " + dist.join(", "),
+    )
+    assert(
+      dist.contains("project_build-0.2.0.tar.gz"),
+      "uv build did not produce the expected sdist: " + dist.join(", "),
+    )
+    null
+  }
+
+  """
+  Auditing runs over the projects that have a lockfile to audit.
+  """
+  uvAuditCheck(ws: Workspace!): Void @check {
+    uv().auditProject(ws, regenerateFixture)
+    uv(audit: ["**", "!" + lockDriftFixture]).auditAll(ws)
+    null
+  }
 }

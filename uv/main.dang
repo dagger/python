@@ -1,0 +1,167 @@
+pub description = "Dependency locking, packaging and auditing for Python projects, powered by uv"
+
+"""
+uv over every Python project in a workspace.
+
+Locking is a generate rather than a pass/fail check: drift then shows up in
+`dagger check` and is repaired by `dagger generate`, which is strictly more
+useful than a check that only says the lockfile is stale.
+
+Packaging is not a check at all. An application-only project and a non-packaged
+uv workspace member have no build backend, and failing those would be wrong.
+
+https://dagger.io
+https://docs.astral.sh/uv/
+"""
+type Uv {
+  """
+  Files whose presence makes a directory a uv project.
+
+  uv reads PEP 621 metadata, so a pyproject.toml is the whole list. A
+  requirements.txt directory has no declarative metadata and neither `uv lock`
+  nor `uv build` applies to it.
+  """
+  let markers: [String!]! = ["pyproject.toml"]
+
+  """
+  Python version used for the default base image. Null when a custom base is set.
+  """
+  pub version: String {
+    lib.version
+  }
+
+  """
+  Project roots to lock ("!" excludes; see the `lock` constructor argument).
+  """
+  pub lock: [String!]! = ["**"]
+
+  """
+  Project roots to audit ("!" excludes; see the `lock` constructor argument).
+  """
+  pub audit: [String!]! = ["**"]
+
+  let pythonVersion: String
+  let base: Container
+
+  new(
+    """
+    Python version used for the default base image. Mutually exclusive with base.
+    """
+    version: String = null,
+    """
+    Base image for every uv container. Expected to provide a Python interpreter
+    and uv on PATH. Mutually exclusive with version.
+    """
+    base: Container = null,
+    """
+    Project roots to lock. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
+    locks everything but docs.
+    """
+    lock: [String!]! = ["**"],
+    """
+    Project roots to audit. Same selection rules as `lock`.
+    """
+    audit: [String!]! = ["**"],
+  ) {
+    self.pythonVersion = version
+    self.base = base
+    self.lock = lock
+    self.audit = audit
+    self
+  }
+
+  let lib: Pyproject! {
+    pyproject(markers: markers, version: pythonVersion, base: base)
+  }
+
+  """
+  Refresh uv.lock in every discovered project that has one.
+
+  A project without a lockfile is left alone: nothing here pushes a project
+  into adopting uv locking that has not asked for it.
+  """
+  pub lockAll(ws: Workspace!): Changeset! @generate {
+    let selected = lib
+      .projects(ws)
+      .{{path, within: withinCwd(ws), chosen: selected(lock), locked: hasFile(ws, "uv.lock")}}
+      .filter { project => project.within and project.chosen and project.locked }
+      .map { project => project.path }
+
+    # Snapshot each project through the same source boundary its lock container
+    # gets, so a lockfile that is already current reads as part of the baseline
+    # instead of as a newly added file.
+    let before = selected.reduce(directory) { before, path =>
+      before.withDirectory(path, lib.project(ws, path, findUp: false).source(ws).directory(path))
+    }
+    let after = selected.reduce(before) { after, path =>
+      after.withDirectory(path, lockContainer(ws, path).directory("."))
+    }
+    after.changes(before)
+  }
+
+  """
+  Audit every discovered project's dependencies for known vulnerabilities.
+
+  Nothing else in this family looks at dependency security, and uv is already
+  the resolver, so this is where the check belongs.
+  """
+  pub auditAll(ws: Workspace!): Void @check {
+    let selected = lib
+      .projects(ws)
+      .{{path, within: withinCwd(ws), chosen: selected(audit), locked: hasFile(ws, "uv.lock")}}
+      .filter { project => project.within and project.chosen and project.locked }
+      .map { project => project.path }
+
+    # FIXME: aggregating into one directory and syncing reports only the first
+    # failure. The fix belongs in Dang, which has no structured concurrency
+    # primitive; dagger/go, ruff and pytest all carry this same shape.
+    selected
+      .reduce(directory) { layers, path =>
+        layers.withDirectory(
+          path,
+          directory.withFile("pyproject.toml", auditContainer(ws, path).file("pyproject.toml")),
+        )
+      }
+      .sync
+    null
+  }
+
+  """
+  Changes made by refreshing one project's uv.lock.
+  """
+  pub lockProject(ws: Workspace!, path: String!): Changeset! {
+    let project = lib.project(ws, path)
+    if (project.selected(lock) == false or project.hasFile(ws, "uv.lock") == false) {
+      directory.changes(directory)
+    } else {
+      let before = directory.withDirectory(project.path, project.source(ws).directory(project.path))
+      before
+        .withDirectory(project.path, lockContainer(ws, project.path).directory("."))
+        .changes(before)
+    }
+  }
+
+  """
+  Audit one project's dependencies for known vulnerabilities.
+  """
+  pub auditProject(ws: Workspace!, path: String!): Void {
+    auditContainer(ws, lib.project(ws, path).path).sync
+    null
+  }
+
+  """
+  Build one project's wheel and sdist, and return the dist directory.
+  """
+  pub build(ws: Workspace!, path: String!): Directory! {
+    lib.project(ws, path).container(ws).withExec(["uv", "build"]).directory("dist")
+  }
+
+  let lockContainer(ws: Workspace!, path: String!): Container! {
+    lib.project(ws, path, findUp: false).container(ws).withExec(["uv", "lock"])
+  }
+
+  let auditContainer(ws: Workspace!, path: String!): Container! {
+    lib.project(ws, path, findUp: false).container(ws).withExec(["uv", "audit"])
+  }
+}

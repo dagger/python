@@ -1,0 +1,130 @@
+pub description = "Static type checking for Python projects, powered by ty"
+
+"""
+ty over every Python project in a workspace.
+
+ty runs inside the project's environment on purpose. Without the installed
+packages it cannot resolve third-party imports, and an unresolved import is
+reported as an error that is not real.
+
+ty is Astral's checker and is still before 1.0. It is its own module rather
+than a setting on the mypy one because the two spell the same flag in different
+languages: mypy's --exclude takes a regular expression and ty's takes a glob,
+so a directory named "sdk-v1.2" needs two different escapes.
+
+https://dagger.io
+https://docs.astral.sh/ty/
+"""
+type Ty {
+  """
+  Files whose presence makes a directory a project ty should check.
+  """
+  let markers: [String!]! = ["pyproject.toml"]
+
+  """
+  Python version used for the default base image. Null when a custom base is set.
+  """
+  pub version: String {
+    lib.version
+  }
+
+  """
+  Project roots to check ("!" excludes; see the `scope` constructor argument).
+  """
+  pub scope: [String!]! = ["**"]
+
+  """
+  ty version used for a project that pins none of its own.
+
+  Pinned rather than floating: `uv run --with ty` resolves to whichever ty is
+  newest on the day it runs, which matters more here than for a stable tool
+  because ty is still before 1.0 and its diagnostics still move.
+  """
+  pub defaultVersion: String! = "0.0.1a21"
+
+  let pythonVersion: String
+  let base: Container
+
+  new(
+    """
+    Python version used for the default base image. Mutually exclusive with base.
+    """
+    version: String = null,
+    """
+    Base image for every ty container. Expected to provide a Python interpreter
+    and uv on PATH. Mutually exclusive with version.
+    """
+    base: Container = null,
+    """
+    Project roots to check. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
+    checks everything but docs.
+    """
+    scope: [String!]! = ["**"],
+    """
+    ty version used for a project that pins none of its own.
+    """
+    defaultVersion: String! = "0.0.1a21",
+  ) {
+    self.pythonVersion = version
+    self.base = base
+    self.scope = scope
+    self.defaultVersion = defaultVersion
+    self
+  }
+
+  let lib: Pyproject! {
+    pyproject(markers: markers, version: pythonVersion, base: base)
+  }
+
+  """
+  Type check every discovered project that holds Python source of its own.
+  """
+  pub checkAll(ws: Workspace!): Void @check {
+    # FIXME: aggregating into one directory and syncing reports only the first
+    # failure. The fix belongs in Dang, which has no structured concurrency
+    # primitive; dagger/go, ruff and pytest all carry this same shape.
+    lib
+      .projects(ws)
+      .{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
+      .filter { project => project.within and project.chosen and project.sources }
+      .map { project => project.path }
+      .reduce(directory) { layers, path =>
+        layers.withDirectory(
+          path,
+          directory.withFile("pyproject.toml", checkContainer(ws, path).file("pyproject.toml")),
+        )
+      }
+      .sync
+    null
+  }
+
+  """
+  Type check one project. A project the caller deselected, or one holding no
+  Python source of its own, is not checked.
+  """
+  pub checkProject(ws: Workspace!, path: String!): Void {
+    let project = lib.project(ws, path)
+    if (project.selected(scope) and project.hasOwnFiles(ws, ["**/*.py"])) {
+      checkContainer(ws, project.path).sync
+    }
+    null
+  }
+
+  """
+  The ty version used for a project: what it pins, else the default.
+  """
+  pub versionFor(ws: Workspace!, path: String!): String! {
+    lib.project(ws, path).toolVersion(ws, "ty") ?? defaultVersion
+  }
+
+  let checkContainer(ws: Workspace!, path: String!): Container! {
+    let project = lib.project(ws, path, findUp: false)
+    project
+      .container(ws)
+      .withExec(
+        ["uv", "run", "--with", "ty==" + versionFor(ws, path), "ty", "check"] +
+          project.excludeNestedFlags(ws, "--exclude", regex: false),
+      )
+  }
+}

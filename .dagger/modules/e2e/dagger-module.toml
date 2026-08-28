@@ -7,3 +7,15 @@ engineVersion = "v1.0.0-beta.11"
 [[dependencies]]
   name = "pyproject"
   source = "../../../pyproject"
+
+[[dependencies]]
+  name = "uv"
+  source = "../../../uv"
+
+[[dependencies]]
+  name = "mypy"
+  source = "../../../mypy"
+
+[[dependencies]]
+  name = "ty"
+  source = "../../../ty"
