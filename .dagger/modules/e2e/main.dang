@@ -401,6 +401,7 @@ type E2e {
   """
   let healthy: [String!]! = [
     "**",
+    "!" + otelSource,
     "!" + typeFailFixture,
     "!" + nestedChildFixture,
     "!" + metacharFixture,
@@ -647,6 +648,140 @@ type E2e {
       .withExec(["uv", "run"] + project.withFlags(["packaging"]) +
         ["python", "-c", "import packaging"])
       .sync
+    null
+  }
+
+  """
+  The pytest module bundles the pytest_otel plugin's source, so it is a project
+  of this workspace too. It is checked in its own repository, not here.
+  """
+  let otelSource: String! = "pytest/pytest_otel"
+
+  let lintFailFixture: String! = "testdata/project-lint-fail"
+  let unformattedFixture: String! = "testdata/project-unformatted"
+  let testFailFixture: String! = "testdata/project-test-fail"
+  let noTestsFixture2: String! = "testdata/project-no-tests"
+
+  """
+  Fixtures ruff must be kept away from: two that are broken on purpose, and the
+  one whose ruff.toml pins a required-version this module's binary is not.
+  """
+  let ruffHealthy: [String!]! = [
+    "**",
+    "!" + otelSource,
+    "!" + lintFailFixture,
+    "!" + ruffTomlFixture,
+  ]
+
+  """
+  ruff lints a healthy workspace, really fails on a violation, and leaves a
+  deselected project alone.
+  """
+  ruffCheck(ws: Workspace!): Void @check {
+    ruff(scope: ruffHealthy).checkAll(ws)
+
+    let failure = {
+      ruff().checkProject(ws, lintFailFixture)
+      "ruff passed an unused import"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      failure.contains("exit code"),
+      "ruff did not fail on a lint violation: " + failure,
+    )
+
+    let aggregate = {
+      ruff(scope: [lintFailFixture]).checkAll(ws)
+      "checkAll skipped the failing project it selected"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      aggregate.contains("exit code"),
+      "checkAll did not run the failing project it selected: " + aggregate,
+    )
+
+    ruff(scope: ["**", "!" + lintFailFixture]).checkProject(ws, lintFailFixture)
+
+    assert(
+      ruff().version.contains("ruff"),
+      "the bundled ruff binary did not report a version: " + ruff().version,
+    )
+    null
+  }
+
+  """
+  ruff formats what needs formatting and leaves the rest alone.
+  """
+  ruffFormatCheck(ws: Workspace!): Void @check {
+    let changed = ruff().formatProject(ws, unformattedFixture)
+    assert(
+      changed.modifiedPaths.contains(unformattedFixture + "/wide.py"),
+      "ruff format did not rewrite an unformatted file: " +
+        (changed.modifiedPaths + changed.addedPaths).join(", "),
+    )
+
+    let clean = ruff().formatProject(ws, passFixture)
+    assert(
+      clean.modifiedPaths.isEmpty and clean.addedPaths.isEmpty,
+      "ruff format rewrote an already-formatted project: " +
+        (clean.modifiedPaths + clean.addedPaths).join(", "),
+    )
+    null
+  }
+
+  """
+  pytest runs a healthy workspace, really fails on a broken test, and skips a
+  project that has no test files instead of failing it.
+
+  Bare pytest exits 5 on an empty collection, so a project whose only fault is
+  having no tests yet used to fail the whole check.
+  """
+  pytestCheck(ws: Workspace!): Void @check {
+    pytest(scope: [
+      "**",
+      "!" + otelSource,
+      "!" + testFailFixture,
+      "!" + nestedChildFixture,
+      "!" + excludedFixture,
+    ]).testAll(ws)
+
+    let failure = {
+      pytest().testProject(ws, testFailFixture)
+      "a failing test project passed"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      failure.contains("exit code"),
+      "a failing test project did not fail: " + failure,
+    )
+
+    assert(
+      pytest().hasTests(ws, noTestsFixture2) == false,
+      "a project without test files reported tests",
+    )
+    # The fix: no test files means skipped, not exit 5.
+    pytest().testProject(ws, noTestsFixture2)
+
+    assert(
+      pytest().hasTests(ws, passFixture),
+      "a project with test files reported none",
+    )
+
+    # The child's test raises; the parent must not collect it.
+    pytest().testProject(ws, nestedFixture)
+    let childFailure = {
+      pytest().testProject(ws, nestedChildFixture)
+      "the nested child's failing test passed"
+    } rescue {
+      err: Error => err.message
+    }
+    assert(
+      childFailure.contains("exit code"),
+      "the nested child's failing test was not run on its own: " + childFailure,
+    )
     null
   }
 

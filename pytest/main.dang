@@ -1,0 +1,180 @@
+pub description = "Testing for Python projects with automatic OpenTelemetry tracing, powered by pytest"
+
+"""
+pytest over every Python project in a workspace.
+
+The environment comes from the shared library, so the `uv sync` underneath a
+test run is the same layer mypy and ty get. There is no runner probing and no
+pip path here: this module is uv-based, and a caller who needs something else
+supplies its own base image.
+
+pytest_otel, the bundled OpenTelemetry plugin, is resolved alongside pytest and
+the project's own dependencies in one uv pass. Installing it over the top of a
+finished environment is what gave a user a dependency conflict that nothing
+caught.
+
+https://dagger.io
+https://pytest.org
+"""
+type Pytest {
+  """
+  Files whose presence makes a directory a pytest project.
+
+  A tox.ini or setup.cfg directory is a pytest project even with no
+  pyproject.toml. That opinion is pytest's own, which is why the library takes
+  it as an argument rather than assuming it.
+  """
+  let markers: [String!]! = ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"]
+
+  """
+  Filename patterns pytest collects tests from.
+  """
+  let testPatterns: [String!]! = ["**/test_*.py", "**/*_test.py"]
+
+  """
+  Python version used for the default base image. Null when a custom base is set.
+  """
+  pub version: String {
+    lib.version
+  }
+
+  """
+  Project roots to test ("!" excludes; see the `scope` constructor argument).
+  """
+  pub scope: [String!]! = ["**"]
+
+  """
+  Extra arguments forwarded to pytest, for example ["-x", "--tb=short"].
+  """
+  pub args: [String!]! = ["-v"]
+
+  """
+  pytest version used for a project that pins none of its own.
+  """
+  pub defaultVersion: String! = "8.4.2"
+
+  """
+  Whether to load the bundled OpenTelemetry plugin.
+  """
+  pub tracing: Boolean! = true
+
+  let pythonVersion: String
+  let base: Container
+
+  new(
+    """
+    Python version used for the default base image. Mutually exclusive with base.
+    """
+    version: String = null,
+    """
+    Base image for every pytest container. Expected to provide a Python
+    interpreter and uv on PATH. Mutually exclusive with version.
+    """
+    base: Container = null,
+    """
+    Project roots to test. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
+    tests everything but docs.
+    """
+    scope: [String!]! = ["**"],
+    """
+    Extra arguments forwarded to pytest.
+    """
+    args: [String!]! = ["-v"],
+    """
+    pytest version used for a project that pins none of its own.
+    """
+    defaultVersion: String! = "8.4.2",
+    """
+    Whether to load the bundled OpenTelemetry plugin.
+    """
+    tracing: Boolean! = true,
+  ) {
+    self.pythonVersion = version
+    self.base = base
+    self.scope = scope
+    self.args = args
+    self.defaultVersion = defaultVersion
+    self.tracing = tracing
+    self
+  }
+
+  let lib: Pyproject! {
+    pyproject(markers: markers, version: pythonVersion, base: base)
+  }
+
+  """
+  The bundled pytest_otel plugin, for a caller wiring up its own container.
+  """
+  pub pytestOtel: Directory! {
+    currentModule.source.directory("pytest_otel")
+  }
+
+  """
+  Test every discovered project that holds test files of its own.
+
+  A project with no test files is skipped rather than run. Bare pytest exits 5
+  on an empty collection, so running it there would fail a project whose only
+  fault is having no tests yet.
+  """
+  pub testAll(ws: Workspace!): Void @check {
+    # FIXME: aggregating into one directory and syncing reports only the first
+    # failure. The fix belongs in Dang, which has no structured concurrency
+    # primitive; dagger/go and every module here carry this same shape.
+    lib
+      .projects(ws)
+      .{{path, within: withinCwd(ws), chosen: selected(scope), tests: hasOwnFiles(ws, testPatterns)}}
+      .filter { project => project.within and project.chosen and project.tests }
+      .map { project => project.path }
+      .reduce(directory) { layers, path =>
+        layers.withDirectory(path, testContainer(ws, path).directory("."))
+      }
+      .sync
+    null
+  }
+
+  """
+  Test one project. A project the caller deselected, or one with no test files
+  of its own, is not run.
+  """
+  pub testProject(ws: Workspace!, path: String!): Void {
+    let project = lib.project(ws, path)
+    if (project.selected(scope) and project.hasOwnFiles(ws, testPatterns)) {
+      testContainer(ws, project.path).sync
+    }
+    null
+  }
+
+  """
+  Whether a project holds test files of its own, rather than only in a project
+  nested inside it.
+  """
+  pub hasTests(ws: Workspace!, path: String!): Boolean! {
+    lib.project(ws, path).hasOwnFiles(ws, testPatterns)
+  }
+
+  """
+  The pytest version used for a project: what it pins, else the default.
+  """
+  pub versionFor(ws: Workspace!, path: String!): String! {
+    lib.project(ws, path).toolVersion(ws, "pytest") ?? defaultVersion
+  }
+
+  let testContainer(ws: Workspace!, path: String!): Container! {
+    let project = lib.project(ws, path, findUp: false)
+    let packages = ["pytest==" + versionFor(ws, path)]
+
+    # pytest_otel is not on PyPI, so it is mounted and named by path. uv still
+    # resolves it in the same pass as pytest and the project's dependencies,
+    # which is the part that matters.
+    let plugin = if (tracing) { ["/opt/pytest_otel"] } else { [] }
+    let ignoreNested = project.nestedProjects(ws).map { nested => "--ignore=" + nested }
+
+    project
+      .env(ws, with: packages)
+      .withDirectory("/opt/pytest_otel", pytestOtel)
+      .withExec(
+        ["uv", "run"] + project.withFlags(packages + plugin) + ["pytest"] + args + ignoreNested,
+      )
+  }
+}

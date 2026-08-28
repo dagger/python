@@ -19,3 +19,11 @@ engineVersion = "v1.0.0-beta.11"
 [[dependencies]]
   name = "ty"
   source = "../../../ty"
+
+[[dependencies]]
+  name = "ruff"
+  source = "../../../ruff"
+
+[[dependencies]]
+  name = "pytest"
+  source = "../../../pytest"

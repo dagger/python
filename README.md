@@ -11,6 +11,8 @@ shared library, in one repository.
 ```
 github.com/dagger/python
 ├── pyproject/    the shared library. No checks.
+├── ruff/         lint, format
+├── pytest/       tests, with OpenTelemetry tracing
 ├── uv/           lock, build, audit
 ├── mypy/         type check
 ├── ty/           type check
@@ -22,23 +24,55 @@ github.com/dagger/python
 Install one module at a time — only the tools you need:
 
 ```sh
+dagger install github.com/dagger/python/ruff    # lint, format
+dagger install github.com/dagger/python/pytest  # tests
 dagger install github.com/dagger/python/uv      # lock, build, audit
 dagger install github.com/dagger/python/mypy    # type check
 dagger install github.com/dagger/python/ty      # type check, Astral's checker
 ```
 
-Two more Python modules live in their own repositories:
-
-```sh
-dagger install github.com/dagger/ruff           # lint, format
-dagger install github.com/dagger/pytest         # tests
-```
-
 `pyproject` is a library, not a tool. You depend on it when you write a module;
-you do not install it to get checks. `dagger/ruff` and `dagger/pytest` move onto
-it once this repository is published.
+you do not install it to get checks.
+
+The standalone `github.com/dagger/ruff` and `github.com/dagger/pytest` still
+exist and still work. The modules here are the same tools rebuilt on the shared
+library; see "Relationship to the standalone modules" below.
 
 ## The modules
+
+### `ruff`
+
+| Function         | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| `check-all`      | Lint every discovered project (a `@check`).              |
+| `format-all`     | Format every discovered project (a `@generate`).         |
+| `check-project`  | Lint one project.                                        |
+| `fix-project`    | Apply ruff's automatic fixes to one project.             |
+| `format-project` | Format one project.                                      |
+| `version`        | The version of the bundled ruff binary.                  |
+
+ruff never touches uv. It is a standalone binary that reaches the same verdicts
+with no interpreter present, so it runs on a bare Alpine base with the pinned
+binary on PATH. It uses the library only for the parts every Python tool
+repeats: finding projects, keeping nested ones apart, and deciding what to
+mount.
+
+### `pytest`
+
+| Function       | Description                                                    |
+| -------------- | -------------------------------------------------------------- |
+| `test-all`     | Test every discovered project that has tests (a `@check`).     |
+| `test-project` | Test one project.                                              |
+| `has-tests`    | Whether a project holds test files of its own.                 |
+| `pytest-otel`  | The bundled OpenTelemetry plugin, as a `Directory`.            |
+
+A project with no test files is skipped rather than run: bare pytest exits 5 on
+an empty collection, so running it there would fail a project whose only fault
+is having no tests yet.
+
+The bundled `pytest_otel` plugin is resolved alongside pytest and the project's
+own dependencies in one uv pass, rather than installed over the top of a
+finished environment.
 
 ### `uv`
 
@@ -121,6 +155,22 @@ day nobody touched any code.
 
 **One environment, not three.** pytest, mypy and ty all ask the library for the
 same container, so one `uv sync` serves three checks.
+
+## Relationship to the standalone modules
+
+`github.com/dagger/ruff` and `github.com/dagger/pytest` came first and are
+unchanged. The `ruff` and `pytest` modules here are the same tools rebuilt on
+the shared library, so they gain what the library gives every module: one
+notion of a project path, one exclude policy, selection patterns, nested
+project isolation, and a shared environment.
+
+Two differences are worth knowing before you switch:
+
+- Paths are workspace-root-relative here. The standalone modules report and
+  accept cwd-relative paths.
+- The `pytest` module here is uv-only. The standalone module probes for pip and
+  supports a container without uv; supply your own `base` image if you need
+  that.
 
 ## Known problem: only one failure is reported
 

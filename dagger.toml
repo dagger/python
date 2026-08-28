@@ -17,6 +17,12 @@ path = "mypy"
 path = "ty"
 
 [[modules.dagger-dang-sdk.as-sdk.modules]]
+path = "ruff"
+
+[[modules.dagger-dang-sdk.as-sdk.modules]]
+path = "pytest"
+
+[[modules.dagger-dang-sdk.as-sdk.modules]]
 path = ".dagger/modules/e2e"
 
 [modules.e2e]
