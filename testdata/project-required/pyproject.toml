@@ -1,0 +1,10 @@
+[project]
+name = "project-required"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+[tool.mypy]
+required-version = "1.10.0"
+
+[tool.pytest.ini_options]
+addopts = "-q"

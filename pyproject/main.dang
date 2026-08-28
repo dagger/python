@@ -1,0 +1,401 @@
+"""
+Shared project discovery and source policy for Dagger modules that work on
+Python code.
+
+Every Python tool has its own opinion about what a project is: a ruff.toml
+directory is a ruff project, a tox.ini directory is a pytest project, and both
+are right. This library owns the mechanics they all repeat -- finding roots,
+resolving them against the workspace root, isolating nested projects, deciding
+what to mount, selecting a subset, and pinning a tool version -- and leaves the
+meaning of a project to the caller.
+
+There are no checks here, on purpose: two modules with a check for the same
+tool would run that tool twice.
+
+https://dagger.io
+"""
+type Pyproject {
+  """
+  Files whose presence marks a directory as a project root.
+
+  Required and never defaulted. The library owns the matching; the caller owns
+  what counts as a project.
+  """
+  pub markers: [String!]!
+
+  """
+  Workspace paths that no project discovers through, mounts, or scans.
+
+  A virtualenv vendors hundreds of third-party manifests and not one of them is
+  a project of this workspace. The caches below only ever slow a mount down.
+  """
+  pub exclude: [String!]!
+
+  """
+  Extra workspace-root include patterns mounted for every project, for shared
+  config or fixture data that lives outside the project directory.
+  """
+  pub includeExtraFiles: [String!]!
+
+  new(
+    """
+    Files whose presence marks a directory as a project root, for example
+    ["pyproject.toml", "ruff.toml"].
+    """
+    markers: [String!]!,
+    """
+    Workspace paths that no project discovers through, mounts, or scans.
+    """
+    exclude: [String!]! = [
+      "**/.venv/**",
+      "**/site-packages/**",
+      "**/node_modules/**",
+      "**/__pycache__/**",
+      "**/*.pyc",
+      "**/.pytest_cache/**",
+      "**/.mypy_cache/**",
+      "**/.ruff_cache/**",
+      "**/*.egg-info/**",
+    ],
+    """
+    Extra workspace-root include patterns mounted for every project.
+    """
+    includeExtraFiles: [String!]! = [],
+  ) {
+    if (markers.isEmpty) {
+      raise "markers must not be empty: the caller decides what a project is"
+    }
+    self.markers = markers
+    self.exclude = exclude
+    self.includeExtraFiles = includeExtraFiles
+    self
+  }
+
+  """
+  Projects discovered at or below the workspace cwd, plus the enclosing project
+  when the cwd is inside one. Paths are workspace-root-relative.
+  """
+  pub projects(ws: Workspace!): [PythonProject!]! {
+    ws
+      .findRoots(markers: markers, exclude: exclude)
+      .map { root => workspaceRootPath(ws, root) }
+      .uniq
+      .map { root => at(root) }
+  }
+
+  """
+  The project containing a workspace path.
+
+  With findUp the path may be anywhere inside a project; without it the path is
+  taken as a project root and no lookup happens, which is what lets a caller
+  ask about a root that does not exist on disk.
+  """
+  pub project(ws: Workspace!, path: String!, findUp: Boolean! = true): PythonProject! {
+    at(if (findUp) { findRootUp(ws, path) } else { normalize(path) })
+  }
+
+  let at(root: String!): PythonProject! {
+    PythonProject(
+      path: root,
+      markers: markers,
+      exclude: exclude,
+      includeExtraFiles: includeExtraFiles,
+    )
+  }
+
+  """
+  The nearest directory at or above `path` that holds one of the markers.
+
+  The deepest hit wins when several markers answer: a ruff.toml beside the code
+  is a more specific answer than a pyproject.toml three levels up.
+  """
+  let findRootUp(ws: Workspace!, path: String!): String! {
+    let roots = markers
+      .map { marker => ws.findUp(marker, path) ?? "" }
+      .reject { found => found == "" }
+      .map { found => parentPath(found.trimPrefix("/")) }
+
+    if (roots.isEmpty) {
+      raise "no project found containing path: " + path +
+        " (markers: " + markers.join(", ") + ")"
+    }
+
+    # "." is the only root at depth 0, so it never loses to the seed.
+    roots.reduce(".") { deepest, root =>
+      if (depth(root) >= depth(deepest)) { root } else { deepest }
+    }
+  }
+
+  """
+  Resolve a cwd-relative discovery result to a workspace-root-relative path.
+
+  findRoots answers relative to the workspace cwd -- "." for the cwd itself and
+  ".." for an enclosing project -- while every other path this library handles
+  is workspace-root-relative.
+  """
+  let workspaceRootPath(ws: Workspace!, cwdPath: String!): String! {
+    let segments = cwdPath.split("/").reject { segment => segment == "" or segment == "." }
+    let up = segments.filter { segment => segment == ".." }.length
+    let down = segments.reject { segment => segment == ".." }
+    let resolved = ws.cwd.split("/").reject { segment => segment == "" }.dropLast(up) + down
+
+    if (resolved.isEmpty) { "." } else { resolved.join("/") }
+  }
+
+  let normalize(path: String!): String! {
+    let segments = path.split("/").reject { segment => segment == "" or segment == "." }
+    if (segments.isEmpty) { "." } else { segments.join("/") }
+  }
+
+  let parentPath(filePath: String!): String! {
+    let segments = filePath.split("/").dropLast(1)
+    if (segments.isEmpty) { "." } else { segments.join("/") }
+  }
+
+  let depth(root: String!): Int! {
+    if (root == ".") { 0 } else { root.split("/").length }
+  }
+}
+
+# Keep both types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+One project rooted at a workspace-relative path.
+"""
+type PythonProject {
+  """
+  Workspace-relative path of this project root.
+  """
+  pub path: String!
+
+  """
+  Files whose presence marks a directory as a project root, inherited from the
+  library. Nested-project detection uses the same markers that found this one.
+  """
+  pub markers: [String!]!
+
+  """
+  Workspace paths this project never mounts or scans.
+  """
+  pub exclude: [String!]!
+
+  """
+  Extra workspace-root include patterns mounted for this project's commands.
+  """
+  pub includeExtraFiles: [String!]!
+
+  """
+  A workspace-root path for a project-relative subpath.
+  """
+  pub subpath(relativePath: String!): String! {
+    if (path == ".") { relativePath } else { path.trimSuffix("/") + "/" + relativePath }
+  }
+
+  """
+  Whether this project root is selected by `patterns`.
+
+  A bare pattern selects, a "!"-prefixed pattern excludes, and an exclude
+  always wins whatever the order. A list with no selecting pattern selects
+  everything left over, so ["!docs"] means "all but docs". "**" and "*" match
+  every project; "X" and "X/**" both mean X and any project below it. Other
+  glob shapes are not interpreted and so select nothing.
+
+  These are dagger/go's selection rules verbatim. Consistency across the two
+  module families is worth more here than any improvement.
+  """
+  pub selected(patterns: [String!]!): Boolean! {
+    let selecting = patterns.reject { pattern => pattern.hasPrefix("!") }
+    let excluding = patterns.filter { pattern => pattern.hasPrefix("!") }
+      .map { pattern => pattern.trimPrefix("!") }
+
+    (selecting.isEmpty or selecting.any { pattern => matches(pattern) }) and
+      excluding.any { pattern => matches(pattern) } == false
+  }
+
+  """
+  Whether this project root matches a single selection glob.
+  """
+  let matches(pattern: String!): Boolean! {
+    let trimmed = pattern.trimPrefix("/").trimSuffix("/")
+    if (trimmed == "**" or trimmed == "*") {
+      true
+    } else {
+      let prefix = trimmed.trimSuffix("/**")
+      path == prefix or path.hasPrefix(prefix + "/")
+    }
+  }
+
+  """
+  Whether this project root is at or below the workspace cwd.
+
+  Discovery reports the enclosing project too, so that a caller working inside
+  a subdirectory still knows which project owns it. A whole-workspace command
+  usually does not want to run there: from `work/app`, a fault in the ancestor
+  `work` is not this call's business.
+  """
+  pub withinCwd(ws: Workspace!): Boolean! {
+    let cwd = ws.cwd.split("/").reject { segment => segment == "" or segment == "." }.join("/")
+    cwd == "" or path == cwd or path.hasPrefix(cwd + "/")
+  }
+
+  """
+  Project-relative roots of the projects nested inside this one.
+
+  A nested marker is discovered as its own project and checked on its own, so
+  this project mounts those subtrees -- uv workspace members are path
+  dependencies -- but keeps them out of its own commands.
+  """
+  pub nestedProjects(ws: Workspace!): [String!]! {
+    let tree = ws.directory("/", include: markerPatterns, exclude: exclude)
+    markers
+      .reduce([]) { found, marker =>
+        found + tree
+          .glob(subpath("**/" + marker))
+          .map { manifest => manifest.trimPrefix(subpath("")) }
+          .reject { manifest => manifest == marker }
+          .map { manifest => manifest.trimSuffix("/" + marker) }
+      }
+      .uniq
+  }
+
+  let markerPatterns: [String!]! {
+    markers.map { marker => subpath("**/" + marker) }
+  }
+
+  """
+  Whether any file matching the project-relative `patterns` belongs to this
+  project rather than to a project nested inside it.
+
+  Patterns are project-relative, so a caller asks for ["**/test_*.py"] and
+  never has to know where the project sits in the workspace.
+  """
+  pub hasOwnFiles(ws: Workspace!, patterns: [String!]!): Boolean! {
+    let scoped = patterns.map { pattern => subpath(pattern) }
+    let tree = ws.directory("/", include: scoped, exclude: exclude)
+    let nested = nestedProjects(ws)
+    scoped
+      .reduce([]) { found, pattern => found + tree.glob(pattern) }
+      .map { file => file.trimPrefix(subpath("")) }
+      .any { file => nested.any { dir => file.hasPrefix(dir + "/") } == false }
+  }
+
+  """
+  Whether this project holds a file at a project-relative path.
+  """
+  pub hasFile(ws: Workspace!, relativePath: String!): Boolean! {
+    ws.directory("/", include: [subpath(relativePath)]).glob(subpath(relativePath)).isEmpty == false
+  }
+
+  """
+  Built-in workspace include patterns for this project's own tree.
+
+  The whole project tree, not an import-graph subset: uv build backends read
+  arbitrary files, uv workspace members are path dependencies, and conftest.py
+  and fixture data are loaded at runtime where no import analysis would see
+  them.
+  """
+  pub includeBase: [String!]! {
+    [subpath("**")]
+  }
+
+  """
+  Final workspace include patterns used to build this project's source.
+  """
+  pub include: [String!]! {
+    includeBase + includeExtraFiles
+  }
+
+  """
+  Workspace source mounted for this project's commands.
+  """
+  pub source(ws: Workspace!): Directory! {
+    ws.directory("/", include: include, exclude: exclude)
+  }
+
+  """
+  The version of `tool` this project pins, or null when it pins none.
+
+  Resolved from uv.lock first, then from a required-version declaration:
+  `[tool.<tool>] required-version` in pyproject.toml, or a top-level
+  `required-version` in <tool>.toml or .<tool>.toml. Each caller supplies its
+  own default for a project that pins nothing, so the library never decides
+  which version of somebody else's tool is the right one.
+
+  Without this, `uv run --with mypy` resolves to whatever mypy shipped that
+  morning, and a check starts failing on a day nobody touched any code.
+  """
+  pub toolVersion(ws: Workspace!, tool: String!): String {
+    lockedVersion(ws, tool) ?? requiredVersion(ws, tool)
+  }
+
+  """
+  The version of `tool` resolved in this project's uv.lock, if it has one.
+  """
+  let lockedVersion(ws: Workspace!, tool: String!): String {
+    let contents = fileContents(ws, "uv.lock")
+    if (contents == "") {
+      null
+    } else {
+      # A uv workspace member can carry the tool's own name; only the resolved
+      # dependency has a registry source, so the local entries are dropped.
+      let versions = contents
+        .split("[[package]]")
+        .filter { block => block.contains("\nname = \"" + tool + "\"\n") }
+        .reject { block => block.contains("editable = ") or block.contains("virtual = ") }
+        .reduce([]) { found, block =>
+          found + block.matchAll(`(?m)^version = "([^"]+)"`).map { found => found.captures[0] }
+        }
+      if (versions.isEmpty) { null } else { versions[0] }
+    }
+  }
+
+  """
+  The version of `tool` this project declares with required-version, if any.
+  """
+  let requiredVersion(ws: Workspace!, tool: String!): String {
+    declaredIn(ws, "pyproject.toml", "tool." + tool) ??
+      declaredIn(ws, tool + ".toml", "") ??
+      declaredIn(ws, "." + tool + ".toml", "")
+  }
+
+  """
+  A required-version read from `section` of a project-relative TOML file, or
+  from its top level when `section` is empty.
+  """
+  let declaredIn(ws: Workspace!, relativePath: String!, section: String!): String {
+    let contents = fileContents(ws, relativePath)
+    if (contents == "") {
+      null
+    } else {
+      let lines = contents.split("\n").map { line => line.trimSpace }
+      let scoped = if (section == "") {
+        lines.takeWhile { line => line.hasPrefix("[") == false }
+      } else {
+        lines
+          .dropWhile { line => line != "[" + section + "]" }
+          .dropFirst(1)
+          .takeWhile { line => line.hasPrefix("[") == false }
+      }
+      let values = scoped.reduce([]) { found, line =>
+        found + line
+          .matchAll(`^required-version\s*=\s*"([^"]*)"`)
+          .map { found => found.captures[0] }
+      }
+      if (values.isEmpty) { null } else { values[0] }
+    }
+  }
+
+  """
+  The contents of a project-relative file, or "" when the project has no such
+  file. Absence is ordinary here, so it is not an error.
+  """
+  let fileContents(ws: Workspace!, relativePath: String!): String! {
+    let tree = ws.directory("/", include: [subpath(relativePath)])
+    if (tree.glob(subpath(relativePath)).isEmpty) {
+      ""
+    } else {
+      tree.file(subpath(relativePath)).contents
+    }
+  }
+}

@@ -1,0 +1,11 @@
+[modules.dagger-dang-sdk]
+source = "github.com/dagger/dang-sdk"
+
+[modules.dagger-dang-sdk.as-sdk]
+name = "dang"
+
+[[modules.dagger-dang-sdk.as-sdk.modules]]
+path = "pyproject"
+
+[modules.pyproject]
+source = "pyproject"
