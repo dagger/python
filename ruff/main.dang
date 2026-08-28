@@ -1,0 +1,199 @@
+pub description = "An extremely fast Python linter and formatter, powered by ruff"
+
+"""
+ruff over every Python project in a workspace.
+
+ruff is the one tool in this family that never touches uv. It is a standalone
+binary that reaches the same verdicts with no interpreter present, so it runs
+on a bare Alpine base with the pinned binary on PATH. Giving it a Python
+environment would only make it slower and change nothing.
+
+It still uses the shared library, for the parts every Python tool repeats:
+finding projects, keeping nested ones apart, deciding what to mount, and
+selecting a subset.
+
+https://dagger.io
+https://docs.astral.sh/ruff/
+"""
+type Ruff {
+  """
+  Files whose presence makes a directory a ruff project.
+
+  A ruff.toml directory is a ruff project even when it holds no pyproject.toml.
+  That opinion is ruff's own, which is why the library takes it as an argument
+  rather than assuming it.
+  """
+  let markers: [String!]! = ["pyproject.toml", "ruff.toml", ".ruff.toml"]
+
+  """
+  Project roots to check ("!" excludes; see the `scope` constructor argument).
+  """
+  pub scope: [String!]! = ["**"]
+
+  """
+  Extra arguments forwarded to every ruff invocation.
+  """
+  pub args: [String!]! = []
+
+  let container: Container
+
+  new(
+    """
+    Project roots to check. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
+    checks everything but docs.
+    """
+    scope: [String!]! = ["**"],
+    """
+    Extra arguments forwarded to every ruff invocation.
+    """
+    args: [String!]! = [],
+    """
+    Base image for every ruff container. Expected to have ruff on PATH. No
+    Python interpreter is needed or used.
+    """
+    container: Container = null,
+  ) {
+    self.scope = scope
+    self.args = args
+    self.container = container
+    self
+  }
+
+  let lib: Pyproject! {
+    pyproject(markers: markers)
+  }
+
+  """
+  The pinned ruff release, extracted from the bundled Docker image so
+  Dependabot can track it in ruff/images/ruff/Dockerfile.
+  """
+  let ruffBinary: Directory! {
+    currentModule.source.directory("images/ruff").dockerBuild.rootfs
+  }
+
+  let alpine: Container! {
+    currentModule.source.directory("images/alpine").dockerBuild
+  }
+
+  """
+  The base every ruff command runs on: Alpine, the pinned binary, and a cache.
+  """
+  pub base: Container! {
+    container ?? alpine
+      .withEnvVariable("RUFF_CACHE_DIR", "/root/.cache/ruff")
+      .withMountedCache("/root/.cache/ruff", cacheVolume("ruff-cache"))
+      .withDirectory("/usr/local/bin", ruffBinary, include: ["ruff"])
+  }
+
+  """
+  Lint every discovered project, and fail on a violation.
+  """
+  pub checkAll(ws: Workspace!): Void @check {
+    # FIXME: aggregating into one directory and syncing reports only the first
+    # failure. The fix belongs in Dang, which has no structured concurrency
+    # primitive; dagger/go and every module here carry this same shape.
+    selectedPaths(ws)
+      .reduce(directory) { layers, path =>
+        layers.withDirectory(path, checkContainer(ws, path).directory("."))
+      }
+      .sync
+    null
+  }
+
+  """
+  Format every discovered project and return the changes.
+  """
+  pub formatAll(ws: Workspace!): Changeset! @generate {
+    let paths = selectedPaths(ws)
+    let before = paths.reduce(directory) { before, path =>
+      before.withDirectory(path, lib.project(ws, path, findUp: false).source(ws).directory(path))
+    }
+    paths
+      .reduce(before) { after, path =>
+        after.withDirectory(path, formatContainer(ws, path).directory("."))
+      }
+      .changes(before)
+  }
+
+  """
+  Lint one project, and fail on a violation.
+  """
+  pub checkProject(ws: Workspace!, path: String!): Void {
+    let project = lib.project(ws, path)
+    if (project.selected(scope)) {
+      checkContainer(ws, project.path).sync
+    }
+    null
+  }
+
+  """
+  Apply ruff's automatic lint fixes to one project.
+
+  Uses --exit-zero, so a violation ruff cannot fix does not fail the call. A
+  real tool error, such as a broken config, still does.
+  """
+  pub fixProject(ws: Workspace!, path: String!): Changeset! {
+    let project = lib.project(ws, path)
+    let fixed = workContainer(ws, project.path)
+      .withExec(["ruff", "check", "--fix", "--exit-zero"] + args + excludeNested(ws, project.path))
+    changesetFor(ws, project.path, fixed)
+  }
+
+  """
+  Format one project and return the changes.
+  """
+  pub formatProject(ws: Workspace!, path: String!): Changeset! {
+    let project = lib.project(ws, path)
+    changesetFor(ws, project.path, formatContainer(ws, project.path))
+  }
+
+  """
+  A workspace-rooted changeset for one project, so its paths read the same as
+  every other module's.
+  """
+  let changesetFor(ws: Workspace!, path: String!, after: Container!): Changeset! {
+    let project = lib.project(ws, path, findUp: false)
+    let before = directory.withDirectory(path, project.source(ws).directory(path))
+    before.withDirectory(path, after.directory(".")).changes(before)
+  }
+
+  """
+  The version of the bundled ruff binary.
+  """
+  pub version: String! {
+    base.withExec(["ruff", "--version"]).stdout
+  }
+
+  let selectedPaths(ws: Workspace!): [String!]! {
+    lib
+      .projects(ws)
+      .{{path, within: withinCwd(ws), chosen: selected(scope)}}
+      .filter { project => project.within and project.chosen }
+      .map { project => project.path }
+  }
+
+  """
+  A nested project is discovered and linted on its own, with its own config, so
+  its parent must leave it alone.
+  """
+  let excludeNested(ws: Workspace!, path: String!): [String!]! {
+    lib.project(ws, path, findUp: false).excludeNestedFlags(ws, "--exclude", regex: false)
+  }
+
+  let workContainer(ws: Workspace!, path: String!): Container! {
+    let project = lib.project(ws, path, findUp: false)
+    base
+      .withWorkdir("/ws")
+      .withDirectory(".", project.source(ws))
+      .withWorkdir(project.path)
+  }
+
+  let checkContainer(ws: Workspace!, path: String!): Container! {
+    workContainer(ws, path).withExec(["ruff", "check"] + args + excludeNested(ws, path))
+  }
+
+  let formatContainer(ws: Workspace!, path: String!): Container! {
+    workContainer(ws, path).withExec(["ruff", "format"] + args + excludeNested(ws, path))
+  }
+}

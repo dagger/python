@@ -1,0 +1,29 @@
+name = "e2e"
+engineVersion = "v1.0.0-beta.11"
+
+[runtime]
+  source = "dang"
+
+[[dependencies]]
+  name = "pyproject"
+  source = "../../../pyproject"
+
+[[dependencies]]
+  name = "uv"
+  source = "../../../uv"
+
+[[dependencies]]
+  name = "mypy"
+  source = "../../../mypy"
+
+[[dependencies]]
+  name = "ty"
+  source = "../../../ty"
+
+[[dependencies]]
+  name = "ruff"
+  source = "../../../ruff"
+
+[[dependencies]]
+  name = "pytest"
+  source = "../../../pytest"
