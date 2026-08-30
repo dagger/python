@@ -80,6 +80,8 @@ class TestCaptureTestOutput:
 
         report = Mock()
         report.when = "call"
+        report.skipped = False
+        del report.wasxfail
         report.failed = False
         report.capstdout = "test stdout"
         report.capstderr = None
@@ -107,6 +109,8 @@ class TestCaptureTestOutput:
 
         report = Mock()
         report.when = "call"
+        report.skipped = False
+        del report.wasxfail
         report.failed = False
         report.capstdout = None
         report.capstderr = "test stderr"
@@ -134,6 +138,8 @@ class TestCaptureTestOutput:
 
         report = Mock()
         report.when = "call"
+        report.skipped = False
+        del report.wasxfail
         report.failed = True
         report.capstdout = None
         report.capstderr = None

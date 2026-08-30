@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 # Attribute names for Dagger UI integration
 ATTR_UI_BOUNDARY = "dagger.io/ui.boundary"
 
+# Why a test did not run, alongside the semantic-convention result status.
+# OpenTelemetry defines test.case.result.status but no matching reason, so this
+# extends the same namespace rather than inventing a separate one.
+ATTR_TEST_CASE_RESULT_REASON = "test.case.result.reason"
+
 
 @dataclass
 class TestNode:
@@ -157,8 +162,10 @@ class SpanContextManager:
             span.end()
             raise
 
-    def end_test(self, item: "pytest.Item", outcome: str) -> None:
-        """End a test span with the given outcome."""
+    def end_test(
+        self, item: "pytest.Item", outcome: str, reason: Optional[str] = None
+    ) -> None:
+        """End a test span with the given outcome and, for a skip, its reason."""
         # Get and remove the node from dict (O(1) lookup)
         node = self._tests.pop(item.nodeid, None)
 
@@ -173,6 +180,9 @@ class SpanContextManager:
 
         # Record outcome using OpenTelemetry test semantic conventions.
         span.set_attribute(TEST_CASE_RESULT_STATUS, self._case_result_status(outcome))
+
+        if reason:
+            span.set_attribute(ATTR_TEST_CASE_RESULT_REASON, reason)
 
         # Set span status based on outcome
         if outcome == "passed":
@@ -287,9 +297,11 @@ def start_test(item: "pytest.Item") -> Span:
     return _context_manager.start_test(item)
 
 
-def end_test(item: "pytest.Item", outcome: str) -> None:
+def end_test(
+    item: "pytest.Item", outcome: str, reason: Optional[str] = None
+) -> None:
     """End a test span."""
-    _context_manager.end_test(item, outcome)
+    _context_manager.end_test(item, outcome, reason)
 
 
 def record_exception(item: "pytest.Item", exc: BaseException) -> None:

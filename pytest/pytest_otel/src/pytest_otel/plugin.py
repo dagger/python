@@ -24,6 +24,9 @@ _log_handler: Optional[OtelLogHandler] = None
 # Track test outcomes by nodeid (populated by pytest_runtest_makereport)
 _test_outcomes: Dict[str, str] = {}
 
+# Track why a test was skipped, by nodeid (populated alongside the outcome)
+_test_reasons: Dict[str, str] = {}
+
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     """Add plugin command-line options."""
@@ -123,6 +126,7 @@ def pytest_runtest_protocol(
 
     # Clear any previous outcome for this test
     _test_outcomes.pop(item.nodeid, None)
+    _test_reasons.pop(item.nodeid, None)
 
     # Start test span
     try:
@@ -145,12 +149,15 @@ def pytest_runtest_protocol(
         tracer.record_exception(item, e)
         raise
     finally:
+        reason = _test_reasons.get(item.nodeid)
+
         # Clean up tracked outcome
         _test_outcomes.pop(item.nodeid, None)
+        _test_reasons.pop(item.nodeid, None)
 
         # Always end span
         try:
-            tracer.end_test(item, outcome)
+            tracer.end_test(item, outcome, reason)
         except Exception as e:
             logger.warning("Failed to end test span for %s: %s", item.nodeid, e)
 
@@ -175,6 +182,9 @@ def pytest_runtest_makereport(
     elif report.skipped and current_outcome == "passed":
         # Skipped only if not already failed
         _test_outcomes[item.nodeid] = "skipped"
+        reason = _skip_reason(report)
+        if reason:
+            _test_reasons[item.nodeid] = reason
     elif report.when == "call" and current_outcome == "passed":
         # Track call phase outcome if no failure yet
         _test_outcomes[item.nodeid] = report.outcome
@@ -195,6 +205,25 @@ def pytest_runtest_makereport(
     return report
 
 
+def _skip_reason(report: TestReport) -> Optional[str]:
+    """Return why a test was skipped, as pytest phrased it.
+
+    pytest reports a skip's reason in longrepr as a (path, lineno, reason)
+    triple, where reason already reads like "Skipped: needs a database". An
+    xfail carries its reason on the report instead.
+    """
+    wasxfail = getattr(report, "wasxfail", None)
+    if wasxfail is not None:
+        return f"xfail: {wasxfail}" if wasxfail else "xfail"
+
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        return str(longrepr[2])
+    if longrepr:
+        return str(longrepr)
+    return None
+
+
 def _capture_test_output(item: pytest.Item, report: TestReport) -> None:
     """Capture test output as OpenTelemetry log records with stdio.stream attribute.
 
@@ -212,8 +241,11 @@ def _capture_test_output(item: pytest.Item, report: TestReport) -> None:
         emit_stdio_log,
     )
 
-    # Only capture from the call phase (not setup/teardown) unless there's a failure
-    if report.when != "call" and not report.failed:
+    # Only capture from the call phase (not setup/teardown) unless the test
+    # failed or was skipped. A test skipped by a marker never reaches the call
+    # phase -- it is reported during setup -- so leaving skips out here is what
+    # left the Tests tab with a skipped test and no reason for it.
+    if report.when != "call" and not report.failed and not report.skipped:
         return
 
     # Get the test span to associate logs with it explicitly.
@@ -239,5 +271,13 @@ def _capture_test_output(item: pytest.Item, report: TestReport) -> None:
     if report.failed and report.longrepr:
         longrepr_str = str(report.longrepr)[:16384]  # Limit size
         emit_stdio_log(longrepr_str, STDIO_STREAM_STDERR, span=test_span)
+
+    # Emit the skip reason as output, which is what the Dagger UI renders under
+    # a skipped test. The attribute set on the span carries the same reason for
+    # anything reading the trace structurally.
+    if report.skipped:
+        reason = _skip_reason(report)
+        if reason:
+            emit_stdio_log(reason[:8192], STDIO_STREAM_STDOUT, span=test_span)
 
 

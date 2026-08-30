@@ -402,6 +402,9 @@ type E2e {
   let healthy: [String!]! = [
     "**",
     "!" + otelSource,
+    # A pytest fixture: it imports pytest, which a type checker cannot resolve
+    # in a project that does not depend on it.
+    "!" + skipFixture,
     "!" + typeFailFixture,
     "!" + nestedChildFixture,
     "!" + metacharFixture,
@@ -656,6 +659,8 @@ type E2e {
   of this workspace too. It is checked in its own repository, not here.
   """
   let otelSource: String! = "pytest/pytest_otel"
+
+  let skipFixture: String! = "testdata/project-skip"
 
   let lintFailFixture: String! = "testdata/project-lint-fail"
   let unformattedFixture: String! = "testdata/project-unformatted"
