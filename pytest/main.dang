@@ -57,6 +57,19 @@ type Pytest {
   """
   pub tracing: Boolean! = true
 
+  """
+  Whether tests may talk to a nested Dagger engine.
+
+  On by default, as it is for Go tests in dagger/go. A suite that drives Dagger
+  needs it, a suite that does not is unaffected, and it costs nothing measurable
+  either way. Without it such a suite fails on "driver for scheme image was not
+  available", which says nothing about what to do next.
+
+  This grants the tests access to Dagger, not to the host. Turn it off to run
+  test code you do not trust.
+  """
+  pub nesting: Boolean! = true
+
   let pythonVersion: String
   let base: Container
 
@@ -88,6 +101,11 @@ type Pytest {
     Whether to load the bundled OpenTelemetry plugin.
     """
     tracing: Boolean! = true,
+    """
+    Whether tests may talk to a nested Dagger engine. Turn it off to run test
+    code you do not trust.
+    """
+    nesting: Boolean! = true,
   ) {
     self.pythonVersion = version
     self.base = base
@@ -95,6 +113,7 @@ type Pytest {
     self.args = args
     self.defaultVersion = defaultVersion
     self.tracing = tracing
+    self.nesting = nesting
     self
   }
 
@@ -174,6 +193,7 @@ type Pytest {
       .withDirectory("/opt/pytest_otel", pytestOtel)
       .withExec(
         ["uv", "run"] + project.withFlags(packages + plugin) + ["pytest"] + args + ignoreNested,
+        experimentalPrivilegedNesting: nesting,
       )
   }
 }

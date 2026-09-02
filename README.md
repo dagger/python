@@ -38,6 +38,26 @@ The standalone `github.com/dagger/ruff` and `github.com/dagger/pytest` still
 exist and still work. The modules here are the same tools rebuilt on the shared
 library; see "Relationship to the standalone modules" below.
 
+## Scoping
+
+Every module discovers **every** project in the workspace, so a repository with
+test fixtures or a vendored copy of some source will have those checked too.
+Say which project roots you mean in `dagger.toml`:
+
+```toml
+[modules.ruff.settings]
+scope = "sdk"
+```
+
+A bare pattern selects, a `"!"`-prefixed pattern excludes, and an exclude wins
+whatever the order. `sdk` means `sdk` and every project below it; `**,!.dagger`
+means everything except the projects under `.dagger`. `uv` spells its two as
+`lock` and `audit` rather than `scope`.
+
+Without this, the first `dagger check` on a repository like `dagger/python-sdk`
+lints a vendored SDK copy under `.dagger/modules/e2e/fixtures` that was never
+meant to be linted, and fails on it.
+
 ## The modules
 
 ### `ruff`
@@ -64,6 +84,7 @@ mount.
 | `test-all`     | Test every discovered project that has tests (a `@check`).     |
 | `test-project` | Test one project.                                              |
 | `has-tests`    | Whether a project holds test files of its own.                 |
+| `nesting`      | Whether tests may talk to a nested Dagger engine (default on). |
 | `pytest-otel`  | The bundled OpenTelemetry plugin, as a `Directory`.            |
 
 A project with no test files is skipped rather than run: bare pytest exits 5 on
@@ -73,6 +94,15 @@ is having no tests yet.
 The bundled `pytest_otel` plugin is resolved alongside pytest and the project's
 own dependencies in one uv pass, rather than installed over the top of a
 finished environment.
+
+A suite that drives Dagger itself needs a nested engine, and gets one by
+default, the same way Go tests do in `dagger/go`. This grants the tests access
+to Dagger, not to the host. Turn it off to run test code you do not trust:
+
+```toml
+[modules.pytest.settings]
+nesting = false
+```
 
 ### `uv`
 
