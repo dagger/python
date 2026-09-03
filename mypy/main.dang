@@ -38,7 +38,7 @@ type Mypy {
   is newest on the day it runs, so a check starts failing on a day nobody
   touched any code.
   """
-  pub defaultVersion: String! = "1.18.2"
+  pub defaultVersion: String! = "2.3.1"
 
   let pythonVersion: String
   let base: Container
@@ -62,7 +62,7 @@ type Mypy {
     """
     mypy version used for a project that pins none of its own.
     """
-    defaultVersion: String! = "1.18.2",
+    defaultVersion: String! = "2.3.1",
   ) {
     self.pythonVersion = version
     self.base = base

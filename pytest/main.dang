@@ -50,7 +50,7 @@ type Pytest {
   """
   pytest version used for a project that pins none of its own.
   """
-  pub defaultVersion: String! = "8.4.2"
+  pub defaultVersion: String! = "9.1.1"
 
   """
   Whether to load the bundled OpenTelemetry plugin.
@@ -96,7 +96,7 @@ type Pytest {
     """
     pytest version used for a project that pins none of its own.
     """
-    defaultVersion: String! = "8.4.2",
+    defaultVersion: String! = "9.1.1",
     """
     Whether to load the bundled OpenTelemetry plugin.
     """

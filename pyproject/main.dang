@@ -102,7 +102,7 @@ type Pyproject {
   """
   Python version used when the caller gives neither a version nor a base.
   """
-  let defaultVersion: String! = "3.13"
+  let defaultVersion: String! = "3.14"
 
   """
   The pinned uv release, extracted from the bundled Docker image so Dependabot

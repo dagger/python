@@ -40,7 +40,7 @@ type Ty {
   newest on the day it runs, which matters more here than for a stable tool
   because ty is still before 1.0 and its diagnostics still move.
   """
-  pub defaultVersion: String! = "0.0.1a21"
+  pub defaultVersion: String! = "0.0.78"
 
   let pythonVersion: String
   let base: Container
@@ -64,7 +64,7 @@ type Ty {
     """
     ty version used for a project that pins none of its own.
     """
-    defaultVersion: String! = "0.0.1a21",
+    defaultVersion: String! = "0.0.78",
   ) {
     self.pythonVersion = version
     self.base = base

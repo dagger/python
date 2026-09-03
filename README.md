@@ -183,6 +183,21 @@ falls back to a pinned module default. `uv run --with mypy` would otherwise
 take whichever mypy shipped that morning, and a check would start failing on a
 day nobody touched any code.
 
+The defaults, for a project that pins nothing:
+
+| | default | where |
+| --- | --- | --- |
+| Python | 3.14 | `pyproject`, `version` |
+| uv | 0.12.9 | `pyproject/images/uv/Dockerfile` |
+| ruff | 0.16.5 | `ruff/images/ruff/Dockerfile` |
+| mypy | 2.3.1 | `mypy`, `defaultVersion` |
+| ty | 0.0.78 | `ty`, `defaultVersion` |
+| pytest | 9.1.1 | `pytest`, `defaultVersion` |
+
+The two in Dockerfiles are there so Dependabot can raise a pull request for
+them. The rest are plain arguments, so a project that wants a different version
+either pins it in its own metadata or sets `defaultVersion`.
+
 **One environment, not three.** pytest, mypy and ty all ask the library for the
 same container, so one `uv sync` serves three checks.
 
