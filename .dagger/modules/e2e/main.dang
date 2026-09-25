@@ -29,6 +29,52 @@ type E2e {
     null
   }
 
+  """
+  Run a check, raising its failure. A check called through a dependency comes
+  back as a Check that has not run.
+  """
+  let run(check: Check!): Void {
+    # Check.error is not null for a passing check when read from Dang, so ask
+    # pass first and read the message only on failure.
+    if (check.pass == false) {
+      raise check.error.message ?? "check failed"
+    }
+    null
+  }
+
+  """
+  The failure message of a check, or "passed" when it passes.
+  """
+  let failureOf(check: Check!): String! {
+    { run(check); "passed" } rescue {
+      err: Error => err.message
+    }
+  }
+
+  """
+  Assert that a batch failure names every failing project and no passing one.
+  """
+  let assertReports(failure: String!, failing: [String!]!, passing: [String!]!): Void {
+    let unreported = failing.reject { path => failure.contains("- " + path + ":") }
+    assert(
+      unreported.isEmpty,
+      "the batch did not report every failing project (" + unreported.join(", ") + "): " + failure,
+    )
+    let reported = passing.filter { path => failure.contains("- " + path + ":") }
+    assert(
+      reported.isEmpty,
+      "the batch reported a passing project (" + reported.join(", ") + "): " + failure,
+    )
+  }
+
+  let isEmpty(changes: Changeset!): Boolean! {
+    changes.addedPaths.isEmpty and changes.modifiedPaths.isEmpty and changes.removedPaths.isEmpty
+  }
+
+  let changedPaths(changes: Changeset!): String! {
+    (changes.addedPaths + changes.modifiedPaths + changes.removedPaths).join(", ")
+  }
+
   let paths(projects: [{{path: String!}}!]!): [String!]! {
     projects.map { project => project.path }
   }
@@ -166,7 +212,9 @@ type E2e {
       "an enclosing project was reported as within the cwd",
     )
     assert(
-      lib.project(ws, nestedChildFixture).withinCwd(ws.withWorkdir(nestedFixture)),
+      lib.project(ws, nestedChildFixture).withinCwd(
+        ws.withWorkdir(nestedFixture),
+      ),
       "a project below the cwd was reported as outside it",
     )
     assert(
@@ -201,6 +249,14 @@ type E2e {
     assert(
       lib.project(ws, nestedChildFixture).path == nestedChildFixture,
       "lookup from a nested root preferred the parent",
+    )
+
+    # The path is read from the workspace root, whatever the cwd.
+    let fromElsewhere = lib.project(ws.withWorkdir(nestedFixture), passFixture + "/tests")
+    assert(
+      fromElsewhere.path == passFixture,
+      "lookup from another cwd did not read the path from the workspace root: "
+        + fromElsewhere.path,
     )
 
     let missing = lookupFailure(ws, "images")
@@ -274,8 +330,8 @@ type E2e {
     let childOnly = lib.project(ws, metacharFixture)
     assert(
       childOnly.nestedProjects(ws).contains("sub.v2"),
-      "parent did not report its dotted nested project: " +
-        childOnly.nestedProjects(ws).join(", "),
+      "parent did not report its dotted nested project: "
+        + childOnly.nestedProjects(ws).join(", "),
     )
     assert(
       lib.project(ws, metacharNestedFixture).hasOwnFiles(ws, ["**/*.py"]),
@@ -369,8 +425,8 @@ type E2e {
     let required = lib.project(ws, requiredFixture)
     assert(
       required.toolVersion(ws, "mypy") == "1.10.0",
-      "required-version was not read from pyproject.toml: " +
-        (required.toolVersion(ws, "mypy") ?? "<null>"),
+      "required-version was not read from pyproject.toml: "
+        + (required.toolVersion(ws, "mypy") ?? "<null>"),
     )
     assert(
       required.toolVersion(ws, "pytest") == null,
@@ -380,8 +436,8 @@ type E2e {
     let ruffToml = pyproject(markers: ["ruff.toml"]).project(ws, ruffTomlFixture)
     assert(
       ruffToml.toolVersion(ws, "ruff") == "0.6.9",
-      "required-version was not read from ruff.toml: " +
-        (ruffToml.toolVersion(ws, "ruff") ?? "<null>"),
+      "required-version was not read from ruff.toml: "
+        + (ruffToml.toolVersion(ws, "ruff") ?? "<null>"),
     )
 
     assert(
@@ -390,13 +446,14 @@ type E2e {
     )
     null
   }
+
   let typeFailFixture: String! = "testdata/project-type-fail"
   let excludedFixture: String! = "testdata/project-excluded"
   let buildFixture: String! = "testdata/project-build"
   let lockDriftFixture: String! = "testdata/project-lock-drift"
 
   """
-  Fixtures that are broken on purpose, left out so the aggregate checks
+  Fixtures that are broken on purpose, left out so the batch checks
   describe a healthy workspace.
   """
   let healthy: [String!]! = [
@@ -412,15 +469,11 @@ type E2e {
   ]
 
   let mypyFailure(ws: Workspace!, path: String!): String! {
-    { mypy(scope: ["**"]).checkProject(ws, path); "mypy passed a type error" } rescue {
-      err: Error => err.message
-    }
+    failureOf(mypy(scope: ["**"]).project(ws, path).typeCheck(ws))
   }
 
   let tyFailure(ws: Workspace!, path: String!): String! {
-    { ty(scope: ["**"]).checkProject(ws, path); "ty passed a type error" } rescue {
-      err: Error => err.message
-    }
+    failureOf(ty(scope: ["**"]).project(ws, path).typeCheck(ws))
   }
 
   """
@@ -428,7 +481,7 @@ type E2e {
   project with no Python source of its own.
   """
   mypyCheck(ws: Workspace!): Void @check {
-    mypy(scope: healthy).checkAll(ws)
+    run(mypy(scope: healthy).projects(ws).batch.typeCheck(ws))
 
     let failure = mypyFailure(ws, typeFailFixture)
     assert(
@@ -436,24 +489,26 @@ type E2e {
       "mypy did not fail on a type error: " + failure,
     )
 
-    # An aggregate that quietly selected nothing would pass the call above, so
+    # A batch that quietly selected nothing would pass the call above, so
     # point it at the project that fails and require the failure to surface.
-    let aggregate = {
-      mypy(scope: [typeFailFixture]).checkAll(ws)
-      "checkAll skipped the failing project it selected"
-    } rescue {
-      err: Error => err.message
-    }
+    let batch = failureOf(
+      mypy(scope: [typeFailFixture]).projects(ws).batch.typeCheck(ws),
+    )
     assert(
-      aggregate.contains("exit code"),
-      "checkAll did not run the failing project it selected: " + aggregate,
+      batch.contains("exit code"),
+      "the batch type check did not run the failing project it selected: " + batch,
     )
 
-    # A deselected project is not checked even though it is broken.
-    mypy(scope: ["**", "!" + typeFailFixture]).checkProject(ws, typeFailFixture)
+    # A deselected project is not checked even though it is broken, by its own
+    # check or by the batch.
+    let deselected = mypy(scope: ["**", "!" + typeFailFixture])
+    run(deselected.project(ws, typeFailFixture).typeCheck(ws))
+    run(
+      deselected.projects(ws).subset(keys: [typeFailFixture]).batch.typeCheck(ws),
+    )
 
     # No Python source of its own, so nothing to check.
-    mypy().checkProject(ws, deepFixture)
+    run(mypy.project(ws, deepFixture).typeCheck(ws))
     null
   }
 
@@ -468,8 +523,8 @@ type E2e {
   """
   nestedExcludeCheck(ws: Workspace!): Void @check {
     # The child's module is mistyped; the parent must still pass.
-    mypy().checkProject(ws, nestedFixture)
-    ty().checkProject(ws, nestedFixture)
+    run(mypy.project(ws, nestedFixture).typeCheck(ws))
+    run(ty.project(ws, nestedFixture).typeCheck(ws))
 
     let childFailure = mypyFailure(ws, nestedChildFixture)
     assert(
@@ -501,7 +556,7 @@ type E2e {
   ty reaches the same verdicts as mypy on the same fixtures.
   """
   tyCheck(ws: Workspace!): Void @check {
-    ty(scope: healthy).checkAll(ws)
+    run(ty(scope: healthy).projects(ws).batch.typeCheck(ws))
 
     let failure = tyFailure(ws, typeFailFixture)
     assert(
@@ -516,12 +571,12 @@ type E2e {
   """
   toolPinCheck(ws: Workspace!): Void @check {
     assert(
-      mypy().versionFor(ws, pinnedFixture) == "1.11.2",
-      "mypy did not take the version pinned in uv.lock: " +
-        mypy().versionFor(ws, pinnedFixture),
+      mypy.versionFor(ws, pinnedFixture) == "1.11.2",
+      "mypy did not take the version pinned in uv.lock: "
+        + mypy.versionFor(ws, pinnedFixture),
     )
     assert(
-      mypy().versionFor(ws, passFixture) == mypy().defaultVersion,
+      mypy.versionFor(ws, passFixture) == mypy.defaultVersion,
       "an unpinned project did not fall back to the module default",
     )
     assert(
@@ -529,8 +584,45 @@ type E2e {
       "the module default version was not configurable",
     )
     assert(
-      ty().versionFor(ws, passFixture) == ty().defaultVersion,
+      ty.versionFor(ws, passFixture) == ty.defaultVersion,
       "ty did not fall back to its own default",
+    )
+    assert(
+      mypy.project(ws, pinnedFixture).version(ws) == "1.11.2",
+      "a mypy project did not report the version pinned in uv.lock",
+    )
+    null
+  }
+
+  """
+  mypy's and ty's projects form collections keyed by project root: a project
+  with no Python source of its own is not a key, a subset batch runs only its
+  own projects, and every failing project is reported.
+  """
+  typeCheckCollectionCheck(ws: Workspace!): Void @check {
+    let mypyKeys = mypy.projects(ws).keys
+    let tyKeys = ty.projects(ws).keys
+    assert(mypyKeys == tyKeys, "mypy and ty disagree on the projects: " + mypyKeys.join(", ") + " / " + tyKeys.join(", "))
+
+    let missing = [passFixture, typeFailFixture, nestedFixture, nestedChildFixture, metacharNestedFixture]
+      .reject { path => mypyKeys.contains(path) }
+    assert(missing.isEmpty, "mypy missed projects: " + missing.join(", "))
+    assert(mypyKeys.contains(deepFixture) == false, "a project with no Python source is a key")
+    assert(mypyKeys.contains(ruffTomlFixture) == false, "a ruff.toml project is a mypy key")
+    assert(mypy.project(ws, deepFixture).hasSources(ws) == false, "a project with no Python source reported some")
+
+    let subset = [passFixture, typeFailFixture, nestedChildFixture]
+    let mypyFailures = failureOf(
+      mypy.projects(ws).subset(keys: subset).batch.typeCheck(ws),
+    )
+    let tyFailures = failureOf(
+      ty.projects(ws).subset(keys: subset).batch.typeCheck(ws),
+    )
+    assertReports(mypyFailures, [typeFailFixture, nestedChildFixture], [passFixture])
+    assertReports(tyFailures, [typeFailFixture, nestedChildFixture], [passFixture])
+
+    run(
+      mypy.projects(ws).subset(keys: [passFixture, nestedFixture]).batch.typeCheck(ws),
     )
     null
   }
@@ -544,50 +636,62 @@ type E2e {
   report the lockfile as newly added forever.
   """
   uvLockCheck(ws: Workspace!): Void @check {
-    let drifted = uv().lockProject(ws, lockDriftFixture)
+    let drifted = uv.project(ws, lockDriftFixture).lock(ws)
     assert(
       drifted.modifiedPaths.contains(lockDriftFixture + "/uv.lock"),
-      "a stale uv.lock was not reported as modified: " +
-        (drifted.modifiedPaths + drifted.addedPaths).join(", "),
+      "a stale uv.lock was not reported as modified: "
+        + (drifted.modifiedPaths + drifted.addedPaths).join(", "),
     )
     assert(
-      drifted.layer.file(lockDriftFixture + "/uv.lock").contents
+      drifted
+        .layer
+        .file(lockDriftFixture + "/uv.lock")
+        .contents
         .contains("requires-python = \">=3.12\""),
       "the refreshed uv.lock did not pick up the new requires-python",
     )
 
-    let driftedAll = uv(lock: [lockDriftFixture]).lockAll(ws)
+    let driftedAll = uv(lock: [lockDriftFixture]).projects(ws).batch.lock(ws)
     assert(
       driftedAll.modifiedPaths.contains(lockDriftFixture + "/uv.lock"),
-      "lockAll did not re-lock the drifted project it selected: " +
-        (driftedAll.modifiedPaths + driftedAll.addedPaths).join(", "),
+      "the batch lock did not re-lock the drifted project it selected: "
+        + (driftedAll.modifiedPaths + driftedAll.addedPaths).join(", "),
     )
 
-    let current = uv().lockProject(ws, regenerateFixture)
+    let current = uv.project(ws, regenerateFixture).lock(ws)
     assert(
-      current.addedPaths.isEmpty and current.modifiedPaths.isEmpty and
-        current.removedPaths.isEmpty,
-      "re-locking an up-to-date project reported changes: " +
-        (current.addedPaths + current.modifiedPaths + current.removedPaths).join(", "),
+      current.addedPaths.isEmpty
+        and current.modifiedPaths.isEmpty
+        and current.removedPaths.isEmpty,
+      "re-locking an up-to-date project reported changes: "
+        + (current.addedPaths + current.modifiedPaths + current.removedPaths).join(", "),
     )
 
-    let unlocked = uv().lockProject(ws, passFixture)
+    let unlocked = uv.project(ws, passFixture).lock(ws)
     assert(
       unlocked.addedPaths.isEmpty and unlocked.modifiedPaths.isEmpty,
       "locking a project without a uv.lock created one",
     )
 
-    let skipped = uv(lock: ["!" + lockDriftFixture]).lockProject(ws, lockDriftFixture)
+    let skipped = uv(lock: ["!" + lockDriftFixture]).project(ws, lockDriftFixture).lock(ws)
     assert(
       skipped.addedPaths.isEmpty and skipped.modifiedPaths.isEmpty,
       "a deselected project was locked anyway",
     )
 
-    let all = uv(lock: ["**", "!" + lockDriftFixture]).lockAll(ws)
+    let all = uv(lock: ["**", "!" + lockDriftFixture]).projects(ws).batch.lock(ws)
     assert(
       all.addedPaths.isEmpty and all.modifiedPaths.isEmpty and all.removedPaths.isEmpty,
-      "lockAll rewrote up-to-date lockfiles: " +
-        (all.addedPaths + all.modifiedPaths + all.removedPaths).join(", "),
+      "the batch lock rewrote up-to-date lockfiles: "
+        + (all.addedPaths + all.modifiedPaths + all.removedPaths).join(", "),
+    )
+
+    # The CLI applies a changeset at the caller's cwd, so it is rooted there.
+    let fromProject = ws.withWorkdir(lockDriftFixture)
+    let local = uv.projects(fromProject).batch.lock(fromProject)
+    assert(
+      local.modifiedPaths == ["uv.lock"],
+      "a changeset from inside the project was not rooted at the cwd: " + changedPaths(local),
     )
     null
   }
@@ -596,7 +700,7 @@ type E2e {
   Packaging produces a wheel and an sdist for a project with a build backend.
   """
   uvBuildCheck(ws: Workspace!): Void @check {
-    let dist = uv().build(ws, buildFixture).entries
+    let dist = uv.project(ws, buildFixture).build(ws).entries
     assert(
       dist.contains("project_build-0.2.0-py3-none-any.whl"),
       "uv build did not produce the expected wheel: " + dist.join(", "),
@@ -612,8 +716,58 @@ type E2e {
   Auditing runs over the projects that have a lockfile to audit.
   """
   uvAuditCheck(ws: Workspace!): Void @check {
-    uv().auditProject(ws, regenerateFixture)
-    uv(audit: ["**", "!" + lockDriftFixture]).auditAll(ws)
+    run(uv.project(ws, regenerateFixture).audit(ws))
+    run(uv(audit: ["**", "!" + lockDriftFixture]).projects(ws).batch.audit(ws))
+    null
+  }
+
+  """
+  uv's projects form a collection keyed by the roots of the projects that have
+  a uv.lock: a subset batch locks and audits only its own projects, and a
+  project deselected for one verb is still a key for the other.
+  """
+  uvCollectionCheck(ws: Workspace!): Void @check {
+    let keys = uv.projects(ws).keys
+    let missing = [lockDriftFixture, regenerateFixture, pinnedFixture, otelSource]
+      .reject { path => keys.contains(path) }
+    assert(missing.isEmpty, "uv missed locked projects: " + missing.join(", "))
+    assert(keys.contains(passFixture) == false, "a project without a uv.lock is a uv key")
+
+    let pair = uv.projects(ws).subset(keys: [lockDriftFixture, regenerateFixture])
+    let locked = pair.batch.lock(ws)
+    assert(
+      locked.modifiedPaths == [lockDriftFixture + "/uv.lock"] and locked.addedPaths.isEmpty,
+      "the batch lock did not return exactly the drifted lockfile: " + changedPaths(locked),
+    )
+    assert(
+      isEmpty(uv.projects(ws).subset(keys: [regenerateFixture]).batch.lock(ws)),
+      "a subset without the drifted project locked it anyway",
+    )
+
+    # Deselected from locking but still audited: one set of keys serves both.
+    let split = uv(lock: ["!" + lockDriftFixture], audit: ["!" + lockDriftFixture])
+    assert(split.projects(ws).keys.contains(lockDriftFixture), "a deselected project was dropped from the keys")
+    assert(
+      split.projects(ws, includeSkipped: false).keys.contains(lockDriftFixture) == false,
+      "includeSkipped false kept a project deselected for every verb",
+    )
+    assert(
+      uv(lock: ["!" + lockDriftFixture]).projects(ws, includeSkipped: false).keys.contains(lockDriftFixture),
+      "includeSkipped false dropped a project that is still audited",
+    )
+    assert(
+      isEmpty(split.projects(ws).subset(keys: [lockDriftFixture]).batch.lock(ws)),
+      "a deselected project was locked by the batch",
+    )
+    run(
+      uv.projects(ws).subset(keys: [regenerateFixture, pinnedFixture]).batch.audit(ws),
+    )
+
+    let dist = uv.projects(ws).subset(keys: [regenerateFixture]).batch.build(ws).glob("**/*.whl")
+    assert(
+      dist.length == 1 and dist.all { file => file.hasPrefix(regenerateFixture + "/") },
+      "the batch build did not place the wheel under its project root: " + dist.join(", "),
+    )
     null
   }
 
@@ -648,8 +802,8 @@ type E2e {
 
     let withExtra = project.env(ws, with: ["packaging"])
     withExtra
-      .withExec(["uv", "run"] + project.withFlags(["packaging"]) +
-        ["python", "-c", "import packaging"])
+      .withExec(["uv", "run"] + project.withFlags(["packaging"])
+        + ["python", "-c", "import packaging"])
       .sync
     null
   }
@@ -683,55 +837,181 @@ type E2e {
   deselected project alone.
   """
   ruffCheck(ws: Workspace!): Void @check {
-    ruff(scope: ruffHealthy).checkAll(ws)
+    run(ruff(scope: ruffHealthy).projects(ws).batch.lint(ws))
 
-    let failure = {
-      ruff().checkProject(ws, lintFailFixture)
-      "ruff passed an unused import"
-    } rescue {
-      err: Error => err.message
-    }
+    let failure = failureOf(ruff.project(ws, lintFailFixture).lint(ws))
     assert(
       failure.contains("exit code"),
       "ruff did not fail on a lint violation: " + failure,
     )
 
-    let aggregate = {
-      ruff(scope: [lintFailFixture]).checkAll(ws)
-      "checkAll skipped the failing project it selected"
-    } rescue {
-      err: Error => err.message
-    }
+    let batch = failureOf(
+      ruff(scope: [lintFailFixture]).projects(ws).batch.lint(ws),
+    )
     assert(
-      aggregate.contains("exit code"),
-      "checkAll did not run the failing project it selected: " + aggregate,
+      batch.contains("exit code"),
+      "the batch lint did not run the failing project it selected: " + batch,
     )
 
-    ruff(scope: ["**", "!" + lintFailFixture]).checkProject(ws, lintFailFixture)
+    # A deselected project is still a key, but neither its own lint nor the
+    # batch runs it.
+    let deselected = ruff(scope: ["**", "!" + lintFailFixture])
+    run(deselected.project(ws, lintFailFixture).lint(ws))
+    assert(deselected.project(ws, lintFailFixture).skip, "a deselected project was not skipped")
+    assert(
+      deselected.projects(ws).keys.contains(lintFailFixture),
+      "a deselected project was dropped from the keys",
+    )
+    assert(
+      deselected.projects(ws, includeSkipped: false).keys.contains(lintFailFixture) == false,
+      "includeSkipped false kept a deselected project",
+    )
+    run(
+      deselected.projects(ws).subset(keys: [lintFailFixture, passFixture]).batch.lint(ws),
+    )
 
     assert(
-      ruff().version.contains("ruff"),
-      "the bundled ruff binary did not report a version: " + ruff().version,
+      ruff.version.contains("ruff"),
+      "the bundled ruff binary did not report a version: " + ruff.version,
     )
     null
   }
 
   """
-  ruff formats what needs formatting and leaves the rest alone.
+  ruff's projects form a collection keyed by project root: the keys are the
+  projects at or below the cwd, get and subset stay within the keys, a subset
+  batch runs only its own projects, and every failing project is reported.
   """
-  ruffFormatCheck(ws: Workspace!): Void @check {
-    let changed = ruff().formatProject(ws, unformattedFixture)
+  ruffCollectionCheck(ws: Workspace!): Void @check {
+    let projects = ruff.projects(ws)
+    let keys = projects.keys
+
+    let missing = [passFixture, lintFailFixture, ruffTomlFixture, nestedChildFixture, otelSource]
+      .reject { path => keys.contains(path) }
+    assert(missing.isEmpty, "ruff missed projects: " + missing.join(", "))
+    assert(keys.contains(".") == false, "ruff invented a root project")
+    assert(keys.length == keys.uniq.length, "ruff reported a project twice")
     assert(
-      changed.modifiedPaths.contains(unformattedFixture + "/wide.py"),
-      "ruff format did not rewrite an unformatted file: " +
-        (changed.modifiedPaths + changed.addedPaths).join(", "),
+      projects.list.{{path}}.map { project => project.path } == keys,
+      "list did not return one project per key, in key order",
     )
 
-    let clean = ruff().formatProject(ws, passFixture)
+    # Keys start at the cwd: an enclosing project is not this call's business.
+    let below = ruff.projects(ws.withWorkdir(nestedFixture)).keys
     assert(
-      clean.modifiedPaths.isEmpty and clean.addedPaths.isEmpty,
-      "ruff format rewrote an already-formatted project: " +
-        (clean.modifiedPaths + clean.addedPaths).join(", "),
+      below == [nestedFixture, nestedChildFixture],
+      "keys from a project root were not that project and the one below it: " + below.join(", "),
+    )
+    let inside = ruff.projects(ws.withWorkdir(passFixture + "/tests")).keys
+    assert(inside.isEmpty, "keys from inside a project reported the enclosing one: " + inside.join(", "))
+    assert(
+      ruff.project(ws.withWorkdir(passFixture + "/tests"), passFixture + "/tests").path == passFixture,
+      "lookup from inside a project did not resolve the enclosing one",
+    )
+
+    assert(projects.get(key: passFixture).path == passFixture, "get did not return the project at its key")
+
+    let pair = projects.subset(keys: [passFixture, lintFailFixture])
+    assert(
+      pair.keys == keys.filter { path => path == passFixture or path == lintFailFixture },
+      "subset did not keep parent order: " + pair.keys.join(", "),
+    )
+    let outside = { pair.get(key: nestedFixture).path } rescue {
+      err: Error => "rejected"
+    }
+    assert(outside == "rejected", "get accepted a key outside the subset")
+    let unknown = { projects.subset(keys: ["no/such/project"]).keys.join(","); "accepted" } rescue {
+      err: Error => "rejected"
+    }
+    assert(unknown == "rejected", "subset accepted an unknown key")
+    let duplicate = {
+      projects.subset(keys: [passFixture, passFixture]).keys.join(",")
+      "accepted"
+    } rescue {
+      err: Error => "rejected"
+    }
+    assert(duplicate == "rejected", "subset accepted a duplicate key")
+
+    let none = projects.subset(keys: [])
+    assert(none.keys.isEmpty, "empty subset kept keys: " + none.keys.join(", "))
+    run(none.batch.lint(ws))
+    assert(isEmpty(none.batch.format(ws)), "an empty subset formatted something")
+
+    # The failing projects are keys, but a subset without them passes.
+    run(projects.subset(keys: [passFixture, nestedFixture]).batch.lint(ws))
+
+    # Every failing project is reported, and a passing one is not.
+    let both = failureOf(
+      projects.subset(keys: [passFixture, lintFailFixture, ruffTomlFixture]).batch.lint(ws),
+    )
+    assertReports(both, [lintFailFixture, ruffTomlFixture], [passFixture])
+    null
+  }
+
+  """
+  ruff formats what needs formatting and leaves the rest alone, and the batch
+  returns one changeset over the selected projects.
+  """
+  ruffFormatCheck(ws: Workspace!): Void @check {
+    let changed = ruff.project(ws, unformattedFixture).format(ws)
+    assert(
+      changed.modifiedPaths.contains(unformattedFixture + "/wide.py"),
+      "ruff format did not rewrite an unformatted file: " + changedPaths(changed),
+    )
+
+    let clean = ruff.project(ws, passFixture).format(ws)
+    assert(isEmpty(clean), "ruff format rewrote an already-formatted project: " + changedPaths(clean))
+
+    let batch = ruff.projects(ws).subset(keys: [passFixture, unformattedFixture]).batch.format(ws)
+    assert(
+      batch.modifiedPaths == [unformattedFixture + "/wide.py"] and batch.addedPaths.isEmpty,
+      "the batch format did not return exactly the unformatted file: " + changedPaths(batch),
+    )
+
+    let skipped = ruff(scope: ["!" + unformattedFixture]).project(ws, unformattedFixture).format(ws)
+    assert(isEmpty(skipped), "a deselected project was formatted: " + changedPaths(skipped))
+
+    # The CLI applies a changeset at the caller's cwd, so it is rooted there.
+    let fromProject = ws.withWorkdir(unformattedFixture)
+    let local = ruff.projects(fromProject).batch.format(fromProject)
+    assert(
+      local.modifiedPaths == ["wide.py"],
+      "a changeset from inside the project was not rooted at the cwd: " + changedPaths(local),
+    )
+    let fromTestdata = ws.withWorkdir("testdata")
+    let nested = ruff.project(fromTestdata, unformattedFixture).format(fromTestdata)
+    assert(
+      nested.modifiedPaths == ["project-unformatted/wide.py"],
+      "a changeset from above the project was not rooted at the cwd: " + changedPaths(nested),
+    )
+    let inside = ws.withWorkdir(passFixture + "/tests")
+    let above = { changedPaths(ruff.project(inside, passFixture).format(inside)) } rescue {
+      err: Error => err.message
+    }
+    assert(
+      above.contains("outside the workspace cwd"),
+      "a project above the cwd was formatted into the wrong place: " + above,
+    )
+    null
+  }
+
+  """
+  ruff's automatic fixes remove what they can and leave the rest to lint.
+  """
+  ruffFixCheck(ws: Workspace!): Void @check {
+    let fixed = ruff.project(ws, lintFailFixture).fix(ws)
+    assert(
+      fixed.modifiedPaths.contains(lintFailFixture + "/unused.py"),
+      "ruff fix did not remove the unused import: " + changedPaths(fixed),
+    )
+    assert(
+      isEmpty(ruff.project(ws, passFixture).fix(ws)),
+      "ruff fix changed a clean project",
+    )
+    let batch = ruff.projects(ws).subset(keys: [passFixture, lintFailFixture]).batch.fix(ws)
+    assert(
+      batch.modifiedPaths == [lintFailFixture + "/unused.py"],
+      "the batch fix did not return exactly the fixed file: " + changedPaths(batch),
     )
     null
   }
@@ -744,16 +1024,10 @@ type E2e {
   having no tests yet used to fail the whole check.
   """
   pytestCheck(ws: Workspace!): Void @check {
-    pytest(scope: [
-      "**",
-      "!" + otelSource,
-      "!" + testFailFixture,
-      "!" + nestedChildFixture,
-      "!" + excludedFixture,
-    ]).testAll(ws)
+    pytest(scope: pytestHealthy).projects(ws).batch.test(ws)
 
     let failure = {
-      pytest().testProject(ws, testFailFixture)
+      pytest.project(ws, testFailFixture).test(ws)
       "a failing test project passed"
     } rescue {
       err: Error => err.message
@@ -764,21 +1038,22 @@ type E2e {
     )
 
     assert(
-      pytest().hasTests(ws, noTestsFixture2) == false,
+      pytest.hasTests(ws, noTestsFixture2) == false,
       "a project without test files reported tests",
     )
     # The fix: no test files means skipped, not exit 5.
-    pytest().testProject(ws, noTestsFixture2)
+    pytest.project(ws, noTestsFixture2).test(ws)
+    run(pytest.project(ws, noTestsFixture2).tests(ws).batch.test(ws))
 
     assert(
-      pytest().hasTests(ws, passFixture),
+      pytest.hasTests(ws, passFixture),
       "a project with test files reported none",
     )
 
     # The child's test raises; the parent must not collect it.
-    pytest().testProject(ws, nestedFixture)
+    pytest.project(ws, nestedFixture).test(ws)
     let childFailure = {
-      pytest().testProject(ws, nestedChildFixture)
+      pytest.project(ws, nestedChildFixture).test(ws)
       "the nested child's failing test passed"
     } rescue {
       err: Error => err.message
@@ -787,7 +1062,89 @@ type E2e {
       childFailure.contains("exit code"),
       "the nested child's failing test was not run on its own: " + childFailure,
     )
+
+    # A deselected project is skipped, and offers no test files to run.
+    let deselected = pytest(scope: ["**", "!" + testFailFixture]).project(ws, testFailFixture)
+    deselected.test(ws)
+    assert(deselected.skip, "a deselected project was not skipped")
+    assert(deselected.tests(ws).keys.isEmpty, "a deselected project offered test files")
+    run(deselected.tests(ws).batch.test(ws))
     null
   }
 
+  """
+  Fixtures pytest must be kept away from, because their tests fail on purpose.
+  """
+  let pytestHealthy: [String!]! = [
+    "**",
+    "!" + otelSource,
+    "!" + testFailFixture,
+    "!" + nestedChildFixture,
+    "!" + excludedFixture,
+  ]
+
+  """
+  pytest's projects form a collection keyed by project root, and each
+  project's test files a nested collection keyed by project-relative path. A
+  subset of projects runs only its own, every failing project is reported, and
+  a test file selection runs only the selected files.
+  """
+  pytestCollectionCheck(ws: Workspace!): Void @check {
+    let projects = pytest.projects(ws)
+    let keys = projects.keys
+    let missing = [passFixture, testFailFixture, nestedFixture, nestedChildFixture, skipFixture, otelSource]
+      .reject { path => keys.contains(path) }
+    assert(missing.isEmpty, "pytest missed projects: " + missing.join(", "))
+    assert(keys.contains(noTestsFixture2) == false, "a project without test files is a key")
+    assert(keys.contains(deepFixture) == false, "a project without test files is a key")
+    assert(projects.get(key: passFixture).path == passFixture, "get did not return the project at its key")
+
+    projects.subset(keys: [passFixture, nestedFixture, skipFixture]).batch.test(ws)
+    let failures = {
+      projects.subset(keys: [passFixture, testFailFixture, nestedChildFixture]).batch.test(ws)
+      "passed"
+    } rescue {
+      err: Error => err.message
+    }
+    assertReports(failures, [testFailFixture, nestedChildFixture], [passFixture])
+
+    # Test files are keyed by project-relative path, in byte order, and a
+    # nested project's files are its own.
+    let broken = "tests/test_broken.py"
+    let passing = "tests/test_passing.py"
+    let tests = pytest.project(ws, testFailFixture).tests(ws)
+    assert(
+      tests.keys == [broken, passing],
+      "test file discovery found: " + tests.keys.join(", "),
+    )
+    assert(
+      pytest.project(ws, nestedFixture).tests(ws).keys == ["tests/test_parent.py"],
+      "a parent claimed its nested project's test files: "
+        + pytest.project(ws, nestedFixture).tests(ws).keys.join(", "),
+    )
+    assert(tests.get(key: passing).path == passing, "get did not return the test file at its key")
+    let outside = { tests.subset(keys: [passing]).get(key: broken).path } rescue {
+      err: Error => "rejected"
+    }
+    assert(outside == "rejected", "get accepted a test file outside the subset")
+    let unknown = { tests.subset(keys: ["tests/test_missing.py"]).keys.join(","); "accepted" } rescue {
+      err: Error => "rejected"
+    }
+    assert(unknown == "rejected", "subset accepted an unknown test file")
+
+    # One test file runs on its own, and fails only when it is the broken one.
+    run(tests.get(key: passing).test(ws))
+    let one = failureOf(tests.get(key: broken).test(ws))
+    assert(one.contains("exit code"), "the broken test file passed on its own: " + one)
+
+    # The whole collection runs the whole project, which fails; filtered to its
+    # passing file, the same project passes, so only the selection ran.
+    let whole = failureOf(tests.batch.test(ws))
+    assert(whole.contains("exit code"), "the project's whole test run passed: " + whole)
+    run(tests.subset(keys: [passing]).batch.test(ws))
+    let filtered = failureOf(tests.subset(keys: [broken]).batch.test(ws))
+    assert(filtered.contains("exit code"), "the broken test file passed in a subset: " + filtered)
+    run(tests.subset(keys: []).batch.test(ws))
+    null
+  }
 }

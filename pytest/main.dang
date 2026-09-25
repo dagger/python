@@ -129,37 +129,33 @@ type Pytest {
   }
 
   """
-  Test every discovered project that holds test files of its own.
+  Python projects at or below the working directory that hold test files of
+  their own, keyed by project root.
 
-  A project with no test files is skipped rather than run. Bare pytest exits 5
-  on an empty collection, so running it there would fail a project whose only
+  A project with no test files is left out rather than run. Bare pytest exits
+  5 on an empty collection, so running it there would fail a project whose only
   fault is having no tests yet.
   """
-  testAll(ws: Workspace!): Void @check {
-    # FIXME: aggregating into one directory and syncing reports only the first
-    # failure. The fix belongs in Dang, which has no structured concurrency
-    # primitive; dagger/go and every module here carry this same shape.
-    lib
-      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope), tests: hasOwnFiles(ws, testPatterns)}}
-      .filter { project => project.within and project.chosen and project.tests }
-      .map { project => project.path }
-      .reduce(directory) { layers, path =>
-        layers.withDirectory(path, testContainer(ws, path).directory("."))
-      }
-      .sync
-    null
+  projects(ws: Workspace!, includeSkipped: Boolean! = true): PytestProjects! {
+    PytestProjects(
+      paths: lib
+        .rootsWithinCwd(ws)
+        .map { root => pytestProject(root) }.{{path, skip, tests: hasTests(ws)}}
+        .filter { project => project.tests and (includeSkipped or project.skip == false) }
+        .map { project => project.path },
+      tool: self,
+    )
   }
 
   """
-  Test one project. A project the caller deselected, or one with no test files
-  of its own, is not run.
+  The pytest project containing a workspace path.
   """
-  testProject(ws: Workspace!, path: String!): Void {
-    let project = lib.project(ws, path)
-    if (project.selected(scope) and project.hasOwnFiles(ws, testPatterns)) {
-      testContainer(ws, project.path).sync
-    }
-    null
+  project(ws: Workspace!, path: String!, findUp: Boolean! = true): PytestProject! {
+    pytestProject(lib.project(ws, path, findUp: findUp).path)
+  }
+
+  let pytestProject(root: String!): PytestProject! {
+    PytestProject(path: root, tool: self)
   }
 
   """
@@ -167,32 +163,227 @@ type Pytest {
   nested inside it.
   """
   hasTests(ws: Workspace!, path: String!): Boolean! {
-    lib.project(ws, path).hasOwnFiles(ws, testPatterns)
+    project(ws, path).hasTests(ws)
   }
 
   """
   The pytest version used for a project: what it pins, else the default.
   """
   versionFor(ws: Workspace!, path: String!): String! {
-    lib.project(ws, path).toolVersion(ws, "pytest") ?? defaultVersion
+    project(ws, path).version(ws)
+  }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Python projects in a workspace that hold test files, keyed by project root.
+"""
+type PytestProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Pytest!
+
+  """
+  The pytest project rooted at path.
+  """
+  project(path: String!): PytestProject! @get {
+    tool.pytestProject(path)
   }
 
-  let testContainer(ws: Workspace!, path: String!): Container! {
-    let project = lib.project(ws, path, findUp: false)
-    let packages = ["pytest==" + versionFor(ws, path)]
+  """
+  Run the tests of the selected projects.
+  """
+  test(ws: Workspace!): Void {
+    # A selection over a list evaluates its elements concurrently, so every
+    # project is tested in parallel and every failure is reported.
+    let failures = paths.map { p => project(p) }.{{path, failure: testFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "pytest failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
+    null
+  }
+}
+
+"""
+A Python project rooted at a workspace-relative path.
+"""
+type PytestProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  let tool: Pytest!
+
+  """
+  Whether this project is outside the configured scope.
+  """
+  skip: Boolean! {
+    tool.lib.at(path).selected(tool.scope) == false
+  }
+
+  """
+  Whether this project holds test files of its own, rather than only in a
+  project nested inside it.
+  """
+  hasTests(ws: Workspace!): Boolean! {
+    tool.lib.at(path).hasOwnFiles(ws, tool.testPatterns)
+  }
+
+  """
+  The pytest version this project is tested with: what it pins, else the
+  module default.
+  """
+  version(ws: Workspace!): String! {
+    tool.lib.at(path).toolVersion(ws, "pytest") ?? tool.defaultVersion
+  }
+
+  """
+  Test files in this project, keyed by project-relative path. Empty when the
+  project is outside the configured scope.
+  """
+  tests(ws: Workspace!): PytestTestFiles! {
+    PytestTestFiles(files: testFiles(ws), project: self)
+  }
+
+  # Test files are found with a glob over pytest's default name patterns, so
+  # listing them runs no container. A project that changes python_files or
+  # testpaths in its pytest config is still listed by the default patterns; the
+  # whole-project run honours its config.
+  let testFiles(ws: Workspace!): [String!]! {
+    let empty: [String!]! = []
+    if (skip) { empty } else { tool.lib.at(path).ownFiles(ws, tool.testPatterns) }
+  }
+
+  """
+  Run this project's tests.
+  """
+  test(ws: Workspace!): Void {
+    let failure = testFailure(ws)
+    if (failure != null) {
+      raise "pytest failed in " + path + ": " + failure
+    }
+    null
+  }
+
+  """
+  Error message from running this project's tests, or null when they pass, the
+  project is outside the configured scope, or it has no test files of its own.
+  """
+  let testFailure(ws: Workspace!): String {
+    if (skip or hasTests(ws) == false) {
+      null
+    } else {
+      { testExec(ws, []).sync; null } rescue {
+        err: Error => err.message
+      }
+    }
+  }
+
+  """
+  Run the tests in the named project-relative files, naming this project when
+  they fail.
+  """
+  let runFiles(ws: Workspace!, files: [String!]!): Void {
+    testExec(ws, files).sync rescue {
+      err: Error => raise "pytest failed in " + path + ": " + err.message
+    }
+    null
+  }
+
+  """
+  Container that has run pytest in this project: over the named project-relative
+  files, or over the whole project when none are named.
+  """
+  let testExec(ws: Workspace!, files: [String!]!): Container! {
+    let project = tool.lib.at(path)
+    let packages = ["pytest==" + version(ws)]
 
     # pytest_otel is not on PyPI, so it is mounted and named by path. uv still
     # resolves it in the same pass as pytest and the project's dependencies,
     # which is the part that matters.
-    let plugin = if (tracing) { ["/opt/pytest_otel"] } else { [] }
+    let plugin = if (tool.tracing) { ["/opt/pytest_otel"] } else { [] }
     let ignoreNested = project.nestedProjects(ws).map { nested => "--ignore=" + nested }
 
     project
       .env(ws, with: packages)
-      .withDirectory("/opt/pytest_otel", pytestOtel)
+      .withDirectory("/opt/pytest_otel", tool.pytestOtel)
       .withExec(
-        ["uv", "run"] + project.withFlags(packages + plugin) + ["pytest"] + args + ignoreNested,
-        experimentalPrivilegedNesting: nesting,
+        ["uv", "run"] + project.withFlags(packages + plugin) + ["pytest"] + tool.args
+          + ignoreNested
+          + files,
+        experimentalPrivilegedNesting: tool.nesting,
       )
+  }
+}
+
+"""
+Test files in a Python project, keyed by project-relative path.
+"""
+type PytestTestFiles @collection {
+  """
+  Test file paths, relative to the project root.
+  """
+  files: [String!]! @keys
+
+  """
+  Test files selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta
+
+  let project: PytestProject!
+
+  """
+  The test file at this project-relative path.
+  """
+  file(path: String!): PytestTestFile! @get {
+    PytestTestFile(path: path, project: project)
+  }
+
+  """
+  Run the selected test files in this project.
+  """
+  test(ws: Workspace!): Void @check {
+    # With nothing selected out, run the project's tests as a whole, as pytest
+    # collects them, rather than listing every file. Without a delta, the file
+    # list is the safe choice.
+    let whole = if (delta == null) {
+      false
+    } else {
+      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
+    }
+    if (whole) {
+      project.test(ws)
+    } else if (files.length > 0) {
+      project.runFiles(ws, files)
+    }
+    null
+  }
+}
+
+"""
+A pytest test file.
+"""
+type PytestTestFile {
+  """
+  Test file path, relative to the project root.
+  """
+  path: String!
+
+  let project: PytestProject!
+
+  """
+  Run this test file.
+  """
+  test(ws: Workspace!): Void @check {
+    project.runFiles(ws, [path])
   }
 }

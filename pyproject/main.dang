@@ -137,15 +137,29 @@ type Pyproject {
   when the cwd is inside one. Paths are workspace-root-relative.
   """
   projects(ws: Workspace!): [PythonProject!]! {
-    ws
-      .findRoots(markers: markers, exclude: exclude)
-      .map { root => workspaceRootPath(ws, root) }
-      .uniq
-      .map { root => at(root) }
+    sorted(
+      ws
+        .findRoots(markers: markers, exclude: exclude)
+        .map { root => workspaceRootPath(ws, root) }
+        .uniq,
+    ).map { root => at(root) }
   }
 
   """
-  The project containing a workspace path.
+  Roots of the projects at or below the workspace cwd, in byte order. The
+  enclosing project that `projects` also reports is left out.
+
+  Found with findRoots alone, so a caller can list projects without running a
+  container.
+  """
+  rootsWithinCwd(ws: Workspace!): [String!]! {
+    projects(ws).{{path, within: withinCwd(ws)}}
+      .filter { project => project.within }
+      .map { project => project.path }
+  }
+
+  """
+  The project containing a workspace-root-relative path, whatever the cwd.
 
   With findUp the path may be anywhere inside a project; without it the path is
   taken as a project root and no lookup happens, which is what lets a caller
@@ -155,7 +169,11 @@ type Pyproject {
     at(if (findUp) { findRootUp(ws, path) } else { normalize(path) })
   }
 
-  let at(root: String!): PythonProject! {
+  """
+  The project rooted at a workspace-root-relative path, taken as given: no
+  lookup happens and no workspace is read.
+  """
+  at(root: String!): PythonProject! {
     PythonProject(
       path: root,
       markers: markers,
@@ -172,8 +190,11 @@ type Pyproject {
   is a more specific answer than a pyproject.toml three levels up.
   """
   let findRootUp(ws: Workspace!, path: String!): String! {
+    # A leading "/" makes findUp read the path from the workspace root rather
+    # than from the cwd, as every other path here is read.
+    let start = if (normalize(path) == ".") { "/" } else { "/" + normalize(path) }
     let roots = markers
-      .map { marker => ws.findUp(marker, path) ?? "" }
+      .map { marker => ws.findUp(marker, start) ?? "" }
       .reject { found => found == "" }
       .map { found => parentPath(found.trimPrefix("/")) }
 
@@ -216,6 +237,15 @@ type Pyproject {
 
   let depth(root: String!): Int! {
     if (root == ".") { 0 } else { root.split("/").length }
+  }
+
+  # Strings in byte order, so keys and the command arguments built from them
+  # stay the same from one run to the next. Dang has no list sort.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    }
   }
 }
 
@@ -308,6 +338,27 @@ type PythonProject {
   }
 
   """
+  This project's root relative to the workspace cwd, which is where the CLI
+  applies a changeset. A changeset rooted at the workspace root and applied
+  from a subdirectory would write every path twice over.
+
+  Fails for a project above the cwd: no changeset applied at the cwd reaches it.
+  """
+  cwdPath(ws: Workspace!): String! {
+    let cwd = ws.cwd.split("/").reject { segment => segment == "" or segment == "." }.join("/")
+    if (cwd == "") {
+      path
+    } else if (path == cwd) {
+      "."
+    } else if (path.hasPrefix(cwd + "/")) {
+      path.trimPrefix(cwd + "/")
+    } else {
+      raise "project " + path + " is outside the workspace cwd " + cwd
+        + ", so a changeset applied there cannot reach it"
+    }
+  }
+
+  """
   Project-relative roots of the projects nested inside this one.
 
   A nested marker is discovered as its own project and checked on its own, so
@@ -327,6 +378,14 @@ type PythonProject {
       .uniq
   }
 
+  # Byte-order sort; see Pyproject.sorted.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    }
+  }
+
   let markerPatterns: [String!]! {
     markers.map { marker => subpath("**/" + marker) }
   }
@@ -339,13 +398,28 @@ type PythonProject {
   never has to know where the project sits in the workspace.
   """
   hasOwnFiles(ws: Workspace!, patterns: [String!]!): Boolean! {
+    ownFiles(ws, patterns).isEmpty == false
+  }
+
+  """
+  Project-relative paths of the files matching the project-relative `patterns`
+  that belong to this project rather than to a project nested inside it,
+  unique and in byte order.
+
+  Found with a glob, so listing them runs no container.
+  """
+  ownFiles(ws: Workspace!, patterns: [String!]!): [String!]! {
     let scoped = patterns.map { pattern => subpath(pattern) }
     let tree = ws.directory("/", include: scoped, exclude: exclude)
     let nested = nestedProjects(ws)
-    scoped
-      .reduce([]) { found, pattern => found + tree.glob(pattern) }
-      .map { file => file.trimPrefix(subpath("")) }
-      .any { file => nested.any { dir => file.hasPrefix(dir + "/") } == false }
+    sorted(
+      scoped
+        .reduce([]) { found, pattern => found + tree.glob(pattern) }
+        .reject { file => file.hasSuffix("/") }
+        .map { file => file.trimPrefix("/").trimPrefix("./").trimPrefix(subpath("")) }
+        .reject { file => nested.any { dir => file.hasPrefix(dir + "/") } }
+        .uniq,
+    )
   }
 
   """

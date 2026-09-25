@@ -308,6 +308,8 @@ type PythonProject {
 
 <p>Dang has no structured concurrency. The Python SDK has <code>anyio.create_task_group()</code>, which gets both results. Dang needs the same thing. Do not repair this one module at a time.</p>
 
+<p><strong>Update: collections.</strong> Each module's checks now run through a collection batch function. It selects over the projects with <code>.{{path, failure}}</code>, which Dang evaluates concurrently, and rescues each project's error on its own. A batch now runs the projects in parallel and reports every failing project, as <code>dagger/go</code>'s batch <code>test</code> does.</p>
+
 <h2>9. Decisions against</h2>
 
 <table>

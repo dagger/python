@@ -76,36 +76,29 @@ type Mypy {
   }
 
   """
-  Type check every discovered project that holds Python source of its own.
+  Python projects at or below the working directory that hold Python source of
+  their own, keyed by project root.
   """
-  checkAll(ws: Workspace!): Void @check {
-    # FIXME: aggregating into one directory and syncing reports only the first
-    # failure. The fix belongs in Dang, which has no structured concurrency
-    # primitive; dagger/go, ruff and pytest all carry this same shape.
-    lib
-      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
-      .filter { project => project.within and project.chosen and project.sources }
-      .map { project => project.path }
-      .reduce(directory) { layers, path =>
-        layers.withDirectory(
-          path,
-          directory.withFile("pyproject.toml", checkContainer(ws, path).file("pyproject.toml")),
-        )
-      }
-      .sync
-    null
+  projects(ws: Workspace!, includeSkipped: Boolean! = true): MypyProjects! {
+    MypyProjects(
+      paths: lib
+        .rootsWithinCwd(ws)
+        .map { root => mypyProject(root) }.{{path, skip, sources: hasSources(ws)}}
+        .filter { project => project.sources and (includeSkipped or project.skip == false) }
+        .map { project => project.path },
+      tool: self,
+    )
   }
 
   """
-  Type check one project. A project the caller deselected, or one holding no
-  Python source of its own, is not checked.
+  The mypy project containing a workspace path.
   """
-  checkProject(ws: Workspace!, path: String!): Void {
-    let project = lib.project(ws, path)
-    if (project.selected(scope) and project.hasOwnFiles(ws, ["**/*.py"])) {
-      checkContainer(ws, project.path).sync
-    }
-    null
+  project(ws: Workspace!, path: String!, findUp: Boolean! = true): MypyProject! {
+    mypyProject(lib.project(ws, path, findUp: findUp).path)
+  }
+
+  let mypyProject(root: String!): MypyProject! {
+    MypyProject(path: root, tool: self)
   }
 
   """
@@ -114,10 +107,108 @@ type Mypy {
   versionFor(ws: Workspace!, path: String!): String! {
     lib.project(ws, path).toolVersion(ws, "mypy") ?? defaultVersion
   }
+}
 
-  let checkContainer(ws: Workspace!, path: String!): Container! {
-    let project = lib.project(ws, path, findUp: false)
-    let packages = ["mypy==" + versionFor(ws, path)]
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Python projects in a workspace, keyed by project root.
+"""
+type MypyProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Mypy!
+
+  """
+  The mypy project rooted at path.
+  """
+  project(path: String!): MypyProject! @get {
+    tool.mypyProject(path)
+  }
+
+  """
+  Type check the selected projects with mypy.
+  """
+  typeCheck(ws: Workspace!): Void @check {
+    # A selection over a list evaluates its elements concurrently, so every
+    # project is checked in parallel and every failure is reported.
+    let failures = paths.map { p => project(p) }.{{path, failure: typeCheckFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "mypy type check failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
+    null
+  }
+}
+
+"""
+A Python project rooted at a workspace-relative path.
+"""
+type MypyProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  let tool: Mypy!
+
+  """
+  Whether this project is outside the configured scope.
+  """
+  skip: Boolean! {
+    tool.lib.at(path).selected(tool.scope) == false
+  }
+
+  """
+  Whether this project holds Python source of its own, rather than only in a
+  project nested inside it.
+  """
+  hasSources(ws: Workspace!): Boolean! {
+    tool.lib.at(path).hasOwnFiles(ws, ["**/*.py"])
+  }
+
+  """
+  The mypy version this project is checked with: what it pins, else the
+  module default.
+  """
+  version(ws: Workspace!): String! {
+    tool.lib.at(path).toolVersion(ws, "mypy") ?? tool.defaultVersion
+  }
+
+  """
+  Type check this project with mypy.
+  """
+  typeCheck(ws: Workspace!): Void @check {
+    let failure = typeCheckFailure(ws)
+    if (failure != null) {
+      raise "mypy type check failed in " + path + ": " + failure
+    }
+    null
+  }
+
+  """
+  Error message from type checking this project, or null when it passes, is
+  outside the configured scope, or holds no Python source of its own.
+  """
+  let typeCheckFailure(ws: Workspace!): String {
+    if (skip or hasSources(ws) == false) {
+      null
+    } else {
+      { typeCheckExec(ws).sync; null } rescue {
+        err: Error => err.message
+      }
+    }
+  }
+
+  let typeCheckExec(ws: Workspace!): Container! {
+    let project = tool.lib.at(path)
+    let packages = ["mypy==" + version(ws)]
     # The environment comes from the library, so the `uv sync` layer underneath
     # is the same one pytest and the other checker get.
     project
