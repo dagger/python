@@ -87,81 +87,61 @@ type Ruff {
   }
 
   """
-  Lint every discovered project, and fail on a violation.
+  Python projects at or below the working directory, plus the one enclosing
+  it, keyed by project root.
   """
-  checkAll(ws: Workspace!): Void @check {
-    # FIXME: aggregating into one directory and syncing reports only the first
-    # failure. The fix belongs in Dang, which has no structured concurrency
-    # primitive; dagger/go and every module here carry this same shape.
-    selectedPaths(ws)
-      .reduce(directory) { layers, path =>
-        layers.withDirectory(path, checkContainer(ws, path).directory("."))
-      }
-      .sync
-    null
+  projects(ws: Workspace!, includeSkipped: Boolean! = true): RuffProjects! {
+    RuffProjects(
+      paths: lib
+        .roots(ws)
+        .map { root => ruffProject(root) }
+        .filter { project => includeSkipped or project.skip == false }
+        .map { project => project.path },
+      tool: self,
+    )
   }
 
   """
-  Format every discovered project and return the changes.
+  The ruff project containing a workspace path.
   """
-  formatAll(ws: Workspace!): Changeset! @generate {
-    let paths = selectedPaths(ws)
-    let before = paths.reduce(directory) { before, path =>
+  project(ws: Workspace!, path: String!, findUp: Boolean! = true): RuffProject! {
+    ruffProject(lib.project(ws, path, findUp: findUp).path)
+  }
+
+  let ruffProject(root: String!): RuffProject! {
+    RuffProject(path: root, tool: self)
+  }
+
+  """
+  One changeset over the projects at `roots`, after running a ruff command in
+  each, rooted at the workspace cwd where the CLI applies it.
+  """
+  let changes(ws: Workspace!, roots: [String!]!, command: [String!]!): Changeset! {
+    # Snapshot each project through the same source boundary its container
+    # gets, so an unchanged file reads as part of the baseline.
+    # A project enclosing the cwd contributes only the part below the cwd,
+    # which is all a changeset applied there can hold.
+    let before = roots.reduce(directory) { before, root =>
+      let project = lib.at(root)
+      let sub = project.cwdSubpath(ws)
       before.withDirectory(
-        path,
-        lib.project(ws, path, findUp: false).source(ws).directory(path),
+        project.cwdPath(ws),
+        project.source(ws).directory(if (sub == ".") { root } else {
+          project.subpath(sub)
+        }),
       )
     }
-    paths
-      .reduce(before) { after, path =>
-        after.withDirectory(path, formatContainer(ws, path).directory("."))
+    roots
+      .reduce(before) { after, root =>
+        let project = lib.at(root)
+        after.withDirectory(
+          project.cwdPath(ws),
+          ruffProject(root).ruffExec(ws, command).directory(
+            project.cwdSubpath(ws),
+          ),
+        )
       }
       .changes(before)
-  }
-
-  """
-  Lint one project, and fail on a violation.
-  """
-  checkProject(ws: Workspace!, path: String!): Void {
-    let project = lib.project(ws, path)
-    if (project.selected(scope)) {
-      checkContainer(ws, project.path).sync
-    }
-    null
-  }
-
-  """
-  Apply ruff's automatic lint fixes to one project.
-
-  Uses --exit-zero, so a violation ruff cannot fix does not fail the call. A
-  real tool error, such as a broken config, still does.
-  """
-  fixProject(ws: Workspace!, path: String!): Changeset! {
-    let project = lib.project(ws, path)
-    let fixed = workContainer(ws, project.path)
-      .withExec(["ruff", "check", "--fix", "--exit-zero"] + args + excludeNested(
-        ws,
-        project.path,
-      ))
-    changesetFor(ws, project.path, fixed)
-  }
-
-  """
-  Format one project and return the changes.
-  """
-  formatProject(ws: Workspace!, path: String!): Changeset! {
-    let project = lib.project(ws, path)
-    changesetFor(ws, project.path, formatContainer(ws, project.path))
-  }
-
-  """
-  A workspace-rooted changeset for one project, so its paths read the same as
-  every other module's.
-  """
-  let changesetFor(ws: Workspace!, path: String!, after: Container!): Changeset! {
-    let project = lib.project(ws, path, findUp: false)
-    let before = directory.withDirectory(path, project.source(ws).directory(path))
-    before.withDirectory(path, after.directory(".")).changes(before)
   }
 
   """
@@ -170,41 +150,145 @@ type Ruff {
   version: String! {
     base.withExec(["ruff", "--version"]).stdout
   }
+}
 
-  let selectedPaths(ws: Workspace!): [String!]! {
-    lib
-      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope)}}
-      .filter { project => project.within and project.chosen }
-      .map { project => project.path }
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Python projects in a workspace, keyed by project root.
+"""
+type RuffProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Ruff!
+
+  """
+  The ruff project rooted at path.
+  """
+  project(path: String!): RuffProject! @get {
+    tool.ruffProject(path)
+  }
+
+  """
+  Lint the selected projects with ruff.
+  """
+  lint(ws: Workspace!): Void @check {
+    # A selection over a list evaluates its elements concurrently, so every
+    # project is linted in parallel and every failure is reported.
+    let failures = paths.map { p => project(p) }.{{path, failure: lintFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "ruff lint failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
+    null
+  }
+
+  """
+  Format the selected projects with ruff.
+  """
+  format(ws: Workspace!): Changeset! @generate {
+    let roots = paths.map { p => project(p) }.filter { p => p.skip == false }.map { p => p.path }
+    tool.changes(ws, roots, ["format"])
+  }
+
+  """
+  Apply ruff's automatic lint fixes to the selected projects.
+  """
+  fix(ws: Workspace!): Changeset! {
+    let roots = paths.map { p => project(p) }.filter { p => p.skip == false }.map { p => p.path }
+    tool.changes(ws, roots, ["check", "--fix", "--exit-zero"])
+  }
+}
+
+"""
+A Python project rooted at a workspace-relative path.
+"""
+type RuffProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  let tool: Ruff!
+
+  """
+  Whether this project is outside the configured scope.
+  """
+  skip: Boolean! {
+    tool.lib.at(path).selected(tool.scope) == false
+  }
+
+  """
+  Lint this project with ruff.
+  """
+  lint(ws: Workspace!): Void @check {
+    let failure = lintFailure(ws)
+    if (failure != null) {
+      raise "ruff lint failed in " + path + ": " + failure
+    }
+    null
+  }
+
+  """
+  Error message from linting this project, or null when it passes or is
+  outside the configured scope.
+  """
+  let lintFailure(ws: Workspace!): String {
+    if (skip) {
+      null
+    } else {
+      { lintExec(ws).sync; null } rescue {
+        err: Error => err.message
+      }
+    }
+  }
+
+  """
+  Format this project with ruff.
+  """
+  format(ws: Workspace!): Changeset! @generate {
+    if (skip) { directory.changes(directory) } else {
+      tool.changes(ws, [path], ["format"])
+    }
+  }
+
+  """
+  Apply ruff's automatic lint fixes to this project.
+
+  Uses --exit-zero, so a violation ruff cannot fix does not fail the call. A
+  real tool error, such as a broken config, still does.
+  """
+  fix(ws: Workspace!): Changeset! {
+    if (skip) { directory.changes(directory) } else {
+      tool.changes(ws, [path], ["check", "--fix", "--exit-zero"])
+    }
   }
 
   """
   A nested project is discovered and linted on its own, with its own config, so
   its parent must leave it alone.
   """
-  let excludeNested(ws: Workspace!, path: String!): [String!]! {
-    lib.project(ws, path, findUp: false).excludeNestedFlags(ws, "--exclude", regex: false)
+  let excludeNested(ws: Workspace!): [String!]! {
+    tool.lib.at(path).excludeNestedFlags(ws, "--exclude", regex: false)
   }
 
-  let workContainer(ws: Workspace!, path: String!): Container! {
-    let project = lib.project(ws, path, findUp: false)
-    base
+  let workContainer(ws: Workspace!): Container! {
+    tool
+      .base
       .withWorkdir("/ws")
-      .withDirectory(".", project.source(ws))
-      .withWorkdir(project.path)
+      .withDirectory(".", tool.lib.at(path).source(ws))
+      .withWorkdir(path)
   }
 
-  let checkContainer(ws: Workspace!, path: String!): Container! {
-    workContainer(ws, path).withExec(["ruff", "check"] + args + excludeNested(
-      ws,
-      path,
-    ))
+  let ruffExec(ws: Workspace!, command: [String!]!): Container! {
+    workContainer(ws).withExec(["ruff"] + command + tool.args + excludeNested(ws))
   }
 
-  let formatContainer(ws: Workspace!, path: String!): Container! {
-    workContainer(ws, path).withExec(["ruff", "format"] + args + excludeNested(
-      ws,
-      path,
-    ))
-  }
+  let lintExec(ws: Workspace!): Container! { ruffExec(ws, ["check"]) }
 }

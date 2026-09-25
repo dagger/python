@@ -4,8 +4,9 @@ pub description = "Dependency locking, packaging and auditing for Python project
 uv over every Python project in a workspace.
 
 Locking is a generate rather than a pass/fail check: drift then shows up in
-`dagger check` and is repaired by `dagger generate`, which is strictly more
-useful than a check that only says the lockfile is stale.
+`dagger check`, as the lock's staleness check, and is repaired by
+`dagger generate`, which is strictly more useful than a check that only says
+the lockfile is stale.
 
 Packaging is not a check at all. An application-only project and a non-packaged
 uv workspace member have no build backend, and failing those would be wrong.
@@ -76,96 +77,206 @@ type Uv {
   }
 
   """
-  Refresh uv.lock in every discovered project that has one.
+  Python projects at or below the working directory, plus the one enclosing
+  it, that have a uv.lock, keyed by project root.
 
   A project without a lockfile is left alone: nothing here pushes a project
   into adopting uv locking that has not asked for it.
   """
-  lockAll(ws: Workspace!): Changeset! @generate {
-    let selected = lib
-      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(lock), locked: hasFile(ws, "uv.lock")}}
-      .filter { project => project.within and project.chosen and project.locked }
-      .map { project => project.path }
+  projects(ws: Workspace!, includeSkipped: Boolean! = true): UvProjects! {
+    UvProjects(
+      paths: lib
+        .rootsWith(ws, "uv.lock")
+        .map { root => uvProject(root) }.{{path, skipLock, skipAudit}}
+        .filter { project =>
+          includeSkipped or project.skipLock == false or project.skipAudit == false
+        }
+        .map { project => project.path },
+      tool: self,
+    )
+  }
 
+  """
+  The uv project containing a workspace path.
+  """
+  project(ws: Workspace!, path: String!, findUp: Boolean! = true): UvProject! {
+    uvProject(lib.project(ws, path, findUp: findUp).path)
+  }
+
+  let uvProject(root: String!): UvProject! {
+    UvProject(path: root, tool: self)
+  }
+
+  """
+  One changeset over refreshing the uv.lock of the projects at `roots`, rooted
+  at the workspace cwd where the CLI applies it.
+  """
+  let lockChanges(ws: Workspace!, roots: [String!]!): Changeset! {
     # Snapshot each project through the same source boundary its lock container
     # gets, so a lockfile that is already current reads as part of the baseline
     # instead of as a newly added file.
-    let before = selected.reduce(directory) { before, path =>
+    # A project enclosing the cwd contributes only the part below the cwd,
+    # which is all a changeset applied there can hold. Its uv.lock sits above
+    # the cwd, so run `dagger generate` from the project root to refresh it.
+    let before = roots.reduce(directory) { before, root =>
+      let project = lib.at(root)
+      let sub = project.cwdSubpath(ws)
       before.withDirectory(
-        path,
-        lib.project(ws, path, findUp: false).source(ws).directory(path),
+        project.cwdPath(ws),
+        project.source(ws).directory(if (sub == ".") { root } else {
+          project.subpath(sub)
+        }),
       )
     }
-    let after = selected.reduce(before) { after, path =>
-      after.withDirectory(path, lockContainer(ws, path).directory("."))
-    }
-    after.changes(before)
-  }
-
-  """
-  Audit every discovered project's dependencies for known vulnerabilities.
-
-  Nothing else in this family looks at dependency security, and uv is already
-  the resolver, so this is where the check belongs.
-  """
-  auditAll(ws: Workspace!): Void @check {
-    let selected = lib
-      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(audit), locked: hasFile(ws, "uv.lock")}}
-      .filter { project => project.within and project.chosen and project.locked }
-      .map { project => project.path }
-
-    # FIXME: aggregating into one directory and syncing reports only the first
-    # failure. The fix belongs in Dang, which has no structured concurrency
-    # primitive; dagger/go, ruff and pytest all carry this same shape.
-    selected
-      .reduce(directory) { layers, path =>
-        layers.withDirectory(
-          path,
-          directory.withFile("pyproject.toml", auditContainer(ws, path).file("pyproject.toml")),
+    roots
+      .reduce(before) { after, root =>
+        let project = lib.at(root)
+        after.withDirectory(
+          project.cwdPath(ws),
+          uvProject(root).lockExec(ws).directory(project.cwdSubpath(ws)),
         )
       }
-      .sync
+      .changes(before)
+  }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Python projects in a workspace that have a uv.lock, keyed by project root.
+"""
+type UvProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Uv!
+
+  """
+  The uv project rooted at path.
+  """
+  project(path: String!): UvProject! @get {
+    tool.uvProject(path)
+  }
+
+  """
+  Audit the selected projects' dependencies for known vulnerabilities.
+  """
+  audit(ws: Workspace!): Void @check {
+    # A selection over a list evaluates its elements concurrently, so every
+    # project is audited in parallel and every failure is reported.
+    let failures = paths.map { p => project(p) }.{{path, failure: auditFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "uv audit failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
     null
   }
 
   """
-  Changes made by refreshing one project's uv.lock.
+  Refresh the selected projects' uv.lock.
   """
-  lockProject(ws: Workspace!, path: String!): Changeset! {
-    let project = lib.project(ws, path)
-    if (project.selected(lock) == false or project.hasFile(ws, "uv.lock") == false) {
-      directory.changes(directory)
+  lock(ws: Workspace!): Changeset! @generate {
+    let roots = paths.map { p => project(p) }.{{path, skipLock, locked: hasLockfile(ws)}}
+      .filter { p => p.skipLock == false and p.locked }
+      .map { p => p.path }
+    tool.lockChanges(ws, roots)
+  }
+
+  """
+  Build the selected projects' wheels and sdists, each under its project root.
+  """
+  build(ws: Workspace!): Directory! {
+    paths.reduce(directory) { dist, p =>
+      dist.withDirectory(p, project(p).build(ws))
+    }
+  }
+}
+
+"""
+A Python project rooted at a workspace-relative path.
+"""
+type UvProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  let tool: Uv!
+
+  """
+  Whether this project is outside the configured lock selection.
+  """
+  skipLock: Boolean! {
+    tool.lib.at(path).selected(tool.lock) == false
+  }
+
+  """
+  Whether this project is outside the configured audit selection.
+  """
+  skipAudit: Boolean! {
+    tool.lib.at(path).selected(tool.audit) == false
+  }
+
+  """
+  Whether this project has a uv.lock.
+  """
+  hasLockfile(ws: Workspace!): Boolean! {
+    tool.lib.at(path).hasFile(ws, "uv.lock")
+  }
+
+  """
+  Audit this project's dependencies for known vulnerabilities.
+  """
+  audit(ws: Workspace!): Void @check {
+    let failure = auditFailure(ws)
+    if (failure != null) {
+      raise "uv audit failed in " + path + ": " + failure
+    }
+    null
+  }
+
+  """
+  Error message from auditing this project, or null when it passes or is
+  outside the configured audit selection.
+  """
+  let auditFailure(ws: Workspace!): String {
+    if (skipAudit) {
+      null
     } else {
-      let before = directory.withDirectory(
-        project.path,
-        project.source(ws).directory(project.path),
-      )
-      before
-        .withDirectory(project.path, lockContainer(ws, project.path).directory("."))
-        .changes(before)
+      { auditExec(ws).sync; null } rescue {
+        err: Error => err.message
+      }
     }
   }
 
   """
-  Audit one project's dependencies for known vulnerabilities.
+  Refresh this project's uv.lock.
   """
-  auditProject(ws: Workspace!, path: String!): Void {
-    auditContainer(ws, lib.project(ws, path).path).sync
-    null
+  lock(ws: Workspace!): Changeset! @generate {
+    if (skipLock or hasLockfile(ws) == false) {
+      directory.changes(directory)
+    } else {
+      tool.lockChanges(ws, [path])
+    }
   }
 
   """
-  Build one project's wheel and sdist, and return the dist directory.
+  Build this project's wheel and sdist, and return the dist directory.
   """
-  build(ws: Workspace!, path: String!): Directory! {
-    lib.project(ws, path).container(ws).withExec(["uv", "build"]).directory("dist")
+  build(ws: Workspace!): Directory! {
+    tool.lib.at(path).container(ws).withExec(["uv", "build"]).directory("dist")
   }
 
-  let lockContainer(ws: Workspace!, path: String!): Container! {
-    lib.project(ws, path, findUp: false).container(ws).withExec(["uv", "lock"])
+  let lockExec(ws: Workspace!): Container! {
+    tool.lib.at(path).container(ws).withExec(["uv", "lock"])
   }
 
-  let auditContainer(ws: Workspace!, path: String!): Container! {
-    lib.project(ws, path, findUp: false).container(ws).withExec(["uv", "audit"])
+  let auditExec(ws: Workspace!): Container! {
+    tool.lib.at(path).container(ws).withExec(["uv", "audit"])
   }
 }

@@ -133,19 +133,133 @@ type Pyproject {
   }
 
   """
-  Projects discovered at or below the workspace cwd, plus the enclosing project
-  when the cwd is inside one. Paths are workspace-root-relative.
+  Projects discovered at or below the workspace cwd, plus the nearest
+  enclosing project when the cwd is inside one but not a root itself. Paths
+  are workspace-root-relative, in byte order.
   """
   projects(ws: Workspace!): [PythonProject!]! {
-    ws
-      .findRoots(markers: markers, exclude: exclude)
-      .map { root => workspaceRootPath(ws, root) }
-      .uniq
-      .map { root => at(root) }
+    roots(ws).map { root => at(root) }
   }
 
   """
-  The project containing a workspace path.
+  Roots of the projects `projects` discovers, in byte order: every project at
+  or below the workspace cwd, plus the nearest enclosing project when the cwd
+  is inside one but not a root itself.
+
+  Found with one findRoots, so a caller can list projects without running a
+  container.
+  """
+  roots(ws: Workspace!): [String!]! {
+    sorted(
+      ws
+        .findRoots(markers: markers, exclude: exclude)
+        .map { root => workspaceRootPath(ws, root) }
+        .uniq,
+    )
+  }
+
+  """
+  The roots, among `roots`, holding a file named `name` directly, such as a
+  lockfile. One more findRoots, so this runs no container.
+  """
+  rootsWith(ws: Workspace!, name: String!): [String!]! {
+    let holding = ws
+      .findRoots(markers: [name], exclude: exclude)
+      .map { root => workspaceRootPath(ws, root) }
+    roots(ws).filter { root => holding.contains(root) }
+  }
+
+  """
+  The roots, among `roots`, of the projects owning at least one file that
+  matches the ripgrep `globs` (e.g. "*.py") and, unless `pattern` is empty,
+  contains a line matching `pattern`.
+
+  A file belongs to the deepest project containing it, so a nested project's
+  files are never its parent's. One ripgrep search covers every project, and
+  `exclude` prunes it, so this runs no container. An empty file has no line to
+  match and is never found.
+  """
+  rootsOwning(ws: Workspace!, globs: [String!]!, pattern: String! = ""): [String!]! {
+    let candidates = roots(ws)
+    let all = ownershipRoots(ws, candidates)
+    let dirs = searchFiles(ws, searchBase(ws, candidates), globs, pattern)
+      .map { file => parentPath(file) }
+      .uniq
+    let owners = dirs.map { dir => ownerOf(all, dir) }.uniq
+    candidates.filter { root => owners.contains(root) }
+  }
+
+  """
+  The files, among those the projects in `roots` own, that match the ripgrep
+  `globs` and, unless `pattern` is empty, contain a line matching `pattern`.
+  Workspace-root-relative, in byte order. See `rootsOwning`.
+  """
+  ownedFiles(ws: Workspace!, globs: [String!]!, pattern: String! = ""): [String!]! {
+    let candidates = roots(ws)
+    let all = ownershipRoots(ws, candidates)
+    sorted(
+      searchFiles(ws, searchBase(ws, candidates), globs, pattern).filter { file =>
+        candidates.contains(ownerOf(all, parentPath(file)))
+      },
+    )
+  }
+
+  """
+  The directory one search has to cover: the enclosing project when the cwd is
+  inside one, since its files outside the cwd are its own too, else the cwd.
+  """
+  let searchBase(ws: Workspace!, candidates: [String!]!): String! {
+    let cwd = normalize(ws.cwd)
+    let above = candidates.filter { root => root != cwd and within(cwd, root) }
+    if (above.isEmpty) { cwd } else { above.takeFirst(1).join("") }
+  }
+
+  """
+  Every root a file under the search base can belong to. An enclosing project
+  can hold nested projects outside the cwd, which `roots` does not report.
+  """
+  let ownershipRoots(ws: Workspace!, candidates: [String!]!): [String!]! {
+    let base = searchBase(ws, candidates)
+    if (base == normalize(ws.cwd)) {
+      candidates
+    } else {
+      candidates + at(base).rootsBelow(ws)
+    }
+  }
+
+  """
+  The deepest of `roots` holding `dir`, or "" when none does.
+  """
+  let ownerOf(roots: [String!]!, dir: String!): String! {
+    roots
+      .filter { root => within(dir, root) }
+      .reduce("") { deepest, root =>
+        if (deepest == "" or deepest == "." or root.hasPrefix(deepest + "/")) { root } else { deepest }
+      }
+  }
+
+  """
+  Whether a workspace-root-relative path is `root` or below it.
+  """
+  let within(path: String!, root: String!): Boolean! {
+    root == "." or path == root or path.hasPrefix(root + "/")
+  }
+
+  """
+  Workspace-root-relative files at or below `base` matching the ripgrep
+  `globs` and `pattern`, from one search with `exclude` pruned.
+  """
+  let searchFiles(
+    ws: Workspace!,
+    base: String!,
+    globs: [String!]!,
+    pattern: String!,
+  ): [String!]! {
+    at(base).searchFiles(ws, globs, pattern)
+  }
+
+  """
+  The project containing a workspace-root-relative path, whatever the cwd.
 
   With findUp the path may be anywhere inside a project; without it the path is
   taken as a project root and no lookup happens, which is what lets a caller
@@ -155,7 +269,11 @@ type Pyproject {
     at(if (findUp) { findRootUp(ws, path) } else { normalize(path) })
   }
 
-  let at(root: String!): PythonProject! {
+  """
+  The project rooted at a workspace-root-relative path, taken as given: no
+  lookup happens and no workspace is read.
+  """
+  at(root: String!): PythonProject! {
     PythonProject(
       path: root,
       markers: markers,
@@ -172,8 +290,11 @@ type Pyproject {
   is a more specific answer than a pyproject.toml three levels up.
   """
   let findRootUp(ws: Workspace!, path: String!): String! {
+    # A leading "/" makes findUp read the path from the workspace root rather
+    # than from the cwd, as every other path here is read.
+    let start = if (normalize(path) == ".") { "/" } else { "/" + normalize(path) }
     let roots = markers
-      .map { marker => ws.findUp(marker, path) ?? "" }
+      .map { marker => ws.findUp(marker, start) ?? "" }
       .reject { found => found == "" }
       .map { found => parentPath(found.trimPrefix("/")) }
 
@@ -216,6 +337,15 @@ type Pyproject {
 
   let depth(root: String!): Int! {
     if (root == ".") { 0 } else { root.split("/").length }
+  }
+
+  # Strings in byte order, so keys and the command arguments built from them
+  # stay the same from one run to the next. Dang has no list sort.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    }
   }
 }
 
@@ -308,6 +438,54 @@ type PythonProject {
   }
 
   """
+  Where this project's changes land in a changeset rooted at the workspace
+  cwd, which is where the CLI applies one: its root relative to the cwd, or
+  "." for the project enclosing the cwd. A changeset rooted at the workspace
+  root and applied from a subdirectory would write every path twice over.
+  """
+  cwdPath(ws: Workspace!): String! {
+    let cwd = normalizePath(ws.cwd)
+    if (under(path, cwd)) {
+      relativeTo(path, cwd)
+    } else if (under(cwd, path)) {
+      "."
+    } else {
+      raise "project " + path + " neither encloses nor sits below the workspace cwd " + cwd
+        + ", so a changeset applied there cannot reach it"
+    }
+  }
+
+  """
+  The project-relative directory whose changes a changeset rooted at the
+  workspace cwd can hold: "." for a project at or below the cwd, and the cwd
+  for the project enclosing it, since a changeset applied there reaches
+  nothing of that project outside the cwd.
+  """
+  cwdSubpath(ws: Workspace!): String! {
+    let cwd = normalizePath(ws.cwd)
+    if (under(path, cwd)) {
+      "."
+    } else if (under(cwd, path)) {
+      relativeTo(cwd, path)
+    } else {
+      raise "project " + path + " neither encloses nor sits below the workspace cwd " + cwd
+        + ", so a changeset applied there cannot reach it"
+    }
+  }
+
+  # Whether a workspace-root-relative path is `root` or below it.
+  let under(child: String!, root: String!): Boolean! {
+    root == "." or child == root or child.hasPrefix(root + "/")
+  }
+
+  # A path below `root`, relative to it.
+  let relativeTo(child: String!, root: String!): String! {
+    if (child == root) { "." } else if (root == ".") { child } else {
+      child.trimPrefix(root + "/")
+    }
+  }
+
+  """
   Project-relative roots of the projects nested inside this one.
 
   A nested marker is discovered as its own project and checked on its own, so
@@ -315,44 +493,112 @@ type PythonProject {
   dependencies -- but keeps them out of its own commands.
   """
   nestedProjects(ws: Workspace!): [String!]! {
-    let tree = ws.directory("/", include: markerPatterns, exclude: exclude)
-    markers
-      .reduce([]) { found, marker =>
-        found + tree
-          .glob(subpath("**/" + marker))
-          .map { manifest => manifest.trimPrefix(subpath("")) }
-          .reject { manifest => manifest == marker }
-          .map { manifest => manifest.trimSuffix("/" + marker) }
-      }
+    rootsBelow(ws)
+      .filter { root => root != path }
+      .map { root => if (path == ".") { root } else { root.trimPrefix(path + "/") } }
+  }
+
+  """
+  Workspace-root-relative roots of this project and every project below it,
+  from one findRoots.
+  """
+  rootsBelow(ws: Workspace!): [String!]! {
+    ws
+      .findRoots(start: "/" + subpath(""), markers: markers, exclude: exclude)
+      .map { root => rootPath(ws, root) }
+      .filter { root => path == "." or root == path or root.hasPrefix(path + "/") }
       .uniq
   }
 
-  let markerPatterns: [String!]! {
-    markers.map { marker => subpath("**/" + marker) }
+  """
+  Resolve a cwd-relative findRoots result to a workspace-root-relative path.
+  """
+  let rootPath(ws: Workspace!, cwdPath: String!): String! {
+    let segments = cwdPath.split("/").reject { segment => segment == "" or segment == "." }
+    let up = segments.filter { segment => segment == ".." }.length
+    let down = segments.reject { segment => segment == ".." }
+    let resolved = ws.cwd.split("/").reject { segment => segment == "" }.dropLast(up) + down
+    if (resolved.isEmpty) { "." } else { resolved.join("/") }
+  }
+
+  let normalizePath(value: String!): String! {
+    let segments = value.split("/").reject { segment => segment == "" or segment == "." }
+    if (segments.isEmpty) { "." } else { segments.join("/") }
   }
 
   """
-  Whether any file matching the project-relative `patterns` belongs to this
-  project rather than to a project nested inside it.
-
-  Patterns are project-relative, so a caller asks for ["**/test_*.py"] and
-  never has to know where the project sits in the workspace.
+  Workspace-root-relative files at or below this project root matching the
+  ripgrep `globs` and, unless `pattern` is empty, containing a line matching
+  it, from one search with `exclude` pruned. Nested projects' files included.
   """
-  hasOwnFiles(ws: Workspace!, patterns: [String!]!): Boolean! {
-    let scoped = patterns.map { pattern => subpath(pattern) }
-    let tree = ws.directory("/", include: scoped, exclude: exclude)
+  searchFiles(ws: Workspace!, globs: [String!]!, pattern: String! = ""): [String!]! {
+    ws
+      .search(
+        paths: ["/" + subpath("")],
+        globs: globs + searchExcludes,
+        pattern: pattern,
+        filesOnly: true,
+      ).{{filePath}}
+      .map { found => found.filePath.trimPrefix("/").trimPrefix("./") }
+      .uniq
+  }
+
+  """
+  `exclude` as ripgrep globs. A "dir/**" pattern also names the directory
+  itself, so ripgrep skips it instead of walking every file inside.
+  """
+  let searchExcludes: [String!]! {
+    let empty: [String!]! = []
+    (exclude + ["**/.git/**"]).reduce(empty) { globs, pattern =>
+      let dir = if (pattern.hasSuffix("/**")) { ["!" + pattern.trimSuffix("/**")] } else { empty }
+      globs + ["!" + pattern] + dir
+    }
+  }
+
+  # Byte-order sort; see Pyproject.sorted.
+  let sorted(items: [String!]!): [String!]! {
+    let empty: [String!]! = []
+    items.reduce(empty) { acc, item =>
+      acc.takeWhile { x => x <= item } + [item] + acc.dropWhile { x => x <= item }
+    }
+  }
+
+  """
+  Whether any file matching the ripgrep `globs` (e.g. "*.py") belongs to this
+  project rather than to a project nested inside it, and, unless `pattern` is
+  empty, contains a line matching `pattern`.
+  """
+  hasOwnFiles(ws: Workspace!, globs: [String!]!, pattern: String! = ""): Boolean! {
+    ownFiles(ws, globs, pattern: pattern).isEmpty == false
+  }
+
+  """
+  Project-relative paths of the files matching the ripgrep `globs` that belong
+  to this project rather than to a project nested inside it and, unless
+  `pattern` is empty, contain a line matching it. Unique and in byte order.
+
+  Found with one findRoots and one ripgrep search, so listing them runs no
+  container. An empty file has no line to match and is never found.
+  """
+  ownFiles(ws: Workspace!, globs: [String!]!, pattern: String! = ""): [String!]! {
     let nested = nestedProjects(ws)
-    scoped
-      .reduce([]) { found, pattern => found + tree.glob(pattern) }
-      .map { file => file.trimPrefix(subpath("")) }
-      .any { file => nested.any { dir => file.hasPrefix(dir + "/") } == false }
+    sorted(
+      searchFiles(ws, globs, pattern: pattern)
+        .map { file =>
+          if (path == ".") { file } else {
+            file.trimPrefix(path + "/")
+          }
+        }
+        .reject { file => nested.any { dir => file.hasPrefix(dir + "/") } },
+    )
   }
 
   """
   Whether this project holds a file at a project-relative path.
   """
   hasFile(ws: Workspace!, relativePath: String!): Boolean! {
-    ws.directory("/", include: [subpath(relativePath)]).glob(subpath(relativePath)).isEmpty == false
+    # A literal pattern, so the glob walks nothing.
+    ws.glob(subpath(relativePath)).isEmpty == false
   }
 
   """
@@ -531,11 +777,10 @@ type PythonProject {
   file. Absence is ordinary here, so it is not an error.
   """
   let fileContents(ws: Workspace!, relativePath: String!): String! {
-    let tree = ws.directory("/", include: [subpath(relativePath)])
-    if (tree.glob(subpath(relativePath)).isEmpty) {
-      ""
+    if (hasFile(ws, relativePath)) {
+      ws.file("/" + subpath(relativePath)).contents
     } else {
-      tree.file(subpath(relativePath)).contents
+      ""
     }
   }
 }

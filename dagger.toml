@@ -1,5 +1,5 @@
 [modules.dagger-dang-sdk]
-source = "github.com/dagger/dang-sdk"
+source = "github.com/dagger/dang-sdk@collections"
 
 [modules.e2e]
 source = ".dagger/modules/e2e"
