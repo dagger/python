@@ -26,9 +26,16 @@ type Pytest {
   let markers: [String!]! = ["pytest.ini", "pyproject.toml", "tox.ini", "setup.cfg"]
 
   """
-  Filename patterns pytest collects tests from.
+  Filename patterns pytest collects tests from, as ripgrep globs.
   """
-  let testPatterns: [String!]! = ["**/test_*.py", "**/*_test.py"]
+  let testGlobs: [String!]! = ["test_*.py", "*_test.py"]
+
+  """
+  A line that declares a test pytest collects by default: a function whose
+  name starts with "test", or a class whose name starts with "Test". A file
+  matching `testGlobs` without one is a helper, and holds no tests to run.
+  """
+  let testLine: String! = `^\s*((async\s+)?def\s+test|class\s+Test)`
 
   """
   Python version used for the default base image. Null when a custom base is set.
@@ -129,20 +136,27 @@ type Pytest {
   }
 
   """
-  Python projects at or below the working directory that hold test files of
-  their own, keyed by project root.
+  Python projects at or below the working directory, plus the one enclosing
+  it, that hold test files of their own, keyed by project root.
 
   A project with no test files is left out rather than run. Bare pytest exits
   5 on an empty collection, so running it there would fail a project whose only
   fault is having no tests yet.
   """
   projects(ws: Workspace!, includeSkipped: Boolean! = true): PytestProjects! {
+    # One search finds every project's test files, and each project's own are
+    # handed to it from here rather than searched for again.
+    let files = lib.ownedFiles(ws, testGlobs, pattern: testLine)
+    let dirs = files.map { file => file.split("/").dropLast(1).join("/") }.uniq
+    let roots = lib.roots(ws)
     PytestProjects(
-      paths: lib
-        .rootsWithinCwd(ws)
-        .map { root => pytestProject(root) }.{{path, skip, tests: hasTests(ws)}}
-        .filter { project => project.tests and (includeSkipped or project.skip == false) }
+      paths: roots
+        .filter { root => owns(roots, root, dirs) }
+        .map { root => pytestProject(root, null) }.{{path, skip}}
+        .filter { project => includeSkipped or project.skip == false }
         .map { project => project.path },
+      testFiles: files,
+      roots: roots,
       tool: self,
     )
   }
@@ -151,11 +165,27 @@ type Pytest {
   The pytest project containing a workspace path.
   """
   project(ws: Workspace!, path: String!, findUp: Boolean! = true): PytestProject! {
-    pytestProject(lib.project(ws, path, findUp: findUp).path)
+    pytestProject(lib.project(ws, path, findUp: findUp).path, null)
   }
 
-  let pytestProject(root: String!): PytestProject! {
-    PytestProject(path: root, tool: self)
+  """
+  The paths, among workspace-root-relative `paths`, that belong to the
+  project at `root` rather than to a deeper one of `roots`.
+  """
+  let ownPaths(roots: [String!]!, root: String!, paths: [String!]!): [String!]! {
+    let prefix = if (root == ".") { "" } else { root + "/" }
+    let deeper = roots.filter { other => other != root and other.hasPrefix(prefix) }
+    paths
+      .filter { path => path == root or path.hasPrefix(prefix) }
+      .reject { path => deeper.any { other => path == other or path.hasPrefix(other + "/") } }
+  }
+
+  let owns(roots: [String!]!, root: String!, dirs: [String!]!): Boolean! {
+    ownPaths(roots, root, dirs).isEmpty == false
+  }
+
+  let pytestProject(root: String!, discovered: [String!]): PytestProject! {
+    PytestProject(path: root, discovered: discovered, tool: self)
   }
 
   """
@@ -186,13 +216,21 @@ type PytestProjects @collection {
   """
   paths: [String!]! @keys
 
+  # Every key's test files, workspace-root-relative, from the one search that
+  # found the keys.
+  let testFiles: [String!]!
+
+  # Every discovered project root, keys or not, which decides whose each test
+  # file is.
+  let roots: [String!]!
+
   let tool: Pytest!
 
   """
   The pytest project rooted at path.
   """
   project(path: String!): PytestProject! @get {
-    tool.pytestProject(path)
+    tool.pytestProject(path, tool.ownPaths(roots, path, testFiles))
   }
 
   """
@@ -221,6 +259,10 @@ type PytestProject {
   """
   path: String!
 
+  # This project's test files, workspace-root-relative, when the collection
+  # that built it already found them; null to search for them.
+  let discovered: [String!]
+
   let tool: Pytest!
 
   """
@@ -235,7 +277,7 @@ type PytestProject {
   project nested inside it.
   """
   hasTests(ws: Workspace!): Boolean! {
-    tool.lib.at(path).hasOwnFiles(ws, tool.testPatterns)
+    ownTests(ws).isEmpty == false
   }
 
   """
@@ -254,13 +296,24 @@ type PytestProject {
     PytestTestFiles(files: testFiles(ws), project: self)
   }
 
-  # Test files are found with a glob over pytest's default name patterns, so
-  # listing them runs no container. A project that changes python_files or
-  # testpaths in its pytest config is still listed by the default patterns; the
-  # whole-project run honours its config.
+  # Test files are found by searching for pytest's default file name patterns
+  # and a test declaration, so listing them runs no container. A project that
+  # changes python_files, python_functions or testpaths in its pytest config is
+  # still listed by the defaults; the whole-project run honours its config.
   let testFiles(ws: Workspace!): [String!]! {
     let empty: [String!]! = []
-    if (skip) { empty } else { tool.lib.at(path).ownFiles(ws, tool.testPatterns) }
+    if (skip) { empty } else { ownTests(ws) }
+  }
+
+  let ownTests(ws: Workspace!): [String!]! {
+    let empty: [String!]! = []
+    if (discovered == null) {
+      tool.lib.at(path).ownFiles(ws, tool.testGlobs, pattern: tool.testLine)
+    } else {
+      (discovered ?? empty).map { file =>
+        if (path == ".") { file } else { file.trimPrefix(path + "/") }
+      }
+    }
   }
 
   """

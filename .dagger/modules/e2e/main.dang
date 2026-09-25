@@ -67,6 +67,13 @@ type E2e {
     )
   }
 
+  """
+  Whether two lists hold the same strings, whatever the order.
+  """
+  let sameFiles(got: [String!]!, want: [String!]!): Boolean! {
+    got.length == want.length and want.all { file => got.contains(file) }
+  }
+
   let isEmpty(changes: Changeset!): Boolean! {
     changes.addedPaths.isEmpty and changes.modifiedPaths.isEmpty and changes.removedPaths.isEmpty
   }
@@ -349,6 +356,25 @@ type E2e {
     assert(
       lib.project(ws, deepFixture).hasOwnFiles(ws, ["**/*.py"]) == false,
       "a project without Python files reported some",
+    )
+
+    # One search decides ownership for every project: a file belongs to the
+    # deepest project holding it, even when that project sits outside the cwd.
+    let owning = lib.rootsOwning(ws.withWorkdir(metacharFixture), ["mistyped.py"])
+    assert(
+      owning == [metacharFixture, metacharNestedFixture],
+      "ownership from a project root: " + owning.join(", "),
+    )
+    let owningInside = lib.rootsOwning(
+      ws.withWorkdir(metacharFixture + "/subXv2"),
+      ["mistyped.py"],
+    )
+    assert(owningInside == [metacharFixture], "ownership from inside a project: " + owningInside.join(", "))
+    assert(
+      lib.ownedFiles(ws.withWorkdir(nestedFixture), ["test_*.py"])
+        == [nestedChildFixture + "/tests/test_child.py", nestedFixture + "/tests/test_parent.py"],
+      "owned files from a project root: "
+        + lib.ownedFiles(ws.withWorkdir(nestedFixture), ["test_*.py"]).join(", "),
     )
     null
   }
@@ -693,6 +719,17 @@ type E2e {
       local.modifiedPaths == ["uv.lock"],
       "a changeset from inside the project was not rooted at the cwd: " + changedPaths(local),
     )
+
+    # From inside a project its uv.lock sits above the cwd, where no changeset
+    # applied there reaches, so the enclosing project is a key and locks to no
+    # changes rather than to misplaced ones.
+    let insideOtel = ws.withWorkdir(otelSource + "/tests")
+    assert(
+      uv.projects(insideOtel).keys == [otelSource],
+      "uv keys from inside a project: " + uv.projects(insideOtel).keys.join(", "),
+    )
+    let otelLock = uv.projects(insideOtel).batch.lock(insideOtel)
+    assert(isEmpty(otelLock), "locking from inside a project reached above the cwd: " + changedPaths(otelLock))
     null
   }
 
@@ -878,8 +915,97 @@ type E2e {
   }
 
   """
-  ruff's projects form a collection keyed by project root: the keys are the
-  projects at or below the cwd, get and subset stay within the keys, a subset
+  Every tool's keys follow the cwd: from a project root, that project and the
+  projects below it; from inside a project, exactly the enclosing project;
+  from outside any project, the projects below. From inside a project, the
+  batches run that project with no selection at all.
+  """
+  cwdSelectionCheck(ws: Workspace!): Void @check {
+    let atRoot = ws.withWorkdir(nestedFixture)
+    let atChild = ws.withWorkdir(nestedChildFixture)
+    let insideChild = ws.withWorkdir(nestedChildFixture + "/tests")
+    let insideParent = ws.withWorkdir(nestedFixture + "/tests")
+    let outside = ws.withWorkdir("testdata/deep")
+    let both = [nestedFixture, nestedChildFixture]
+
+    assertKeys("ruff at a root", ruff.projects(atRoot).keys, both)
+    assertKeys("ruff at a nested root", ruff.projects(atChild).keys, [nestedChildFixture])
+    assertKeys(
+      "ruff inside a nested project",
+      ruff.projects(insideChild).keys,
+      [nestedChildFixture],
+    )
+    assertKeys(
+      "ruff inside a parent project",
+      ruff.projects(insideParent).keys,
+      [nestedFixture],
+    )
+    assertKeys("ruff outside any project", ruff.projects(outside).keys, [deepFixture])
+
+    assertKeys("mypy at a root", mypy.projects(atRoot).keys, both)
+    assertKeys("mypy at a nested root", mypy.projects(atChild).keys, [nestedChildFixture])
+    assertKeys(
+      "mypy inside a nested project",
+      mypy.projects(insideChild).keys,
+      [nestedChildFixture],
+    )
+    assertKeys(
+      "mypy inside a parent project",
+      mypy.projects(insideParent).keys,
+      [nestedFixture],
+    )
+    assertKeys("mypy outside any project", mypy.projects(outside).keys, [])
+    assertKeys("ty inside a nested project", ty.projects(insideChild).keys, [nestedChildFixture])
+
+    assertKeys("pytest at a root", pytest.projects(atRoot).keys, both)
+    assertKeys(
+      "pytest inside a nested project",
+      pytest.projects(insideChild).keys,
+      [nestedChildFixture],
+    )
+    assertKeys(
+      "pytest inside a parent project",
+      pytest.projects(insideParent).keys,
+      [nestedFixture],
+    )
+    assertKeys("pytest outside any project", pytest.projects(outside).keys, [])
+    assertKeys(
+      "pytest test files inside a nested project",
+      pytest.projects(insideChild).get(key: nestedChildFixture).tests(insideChild).keys,
+      ["tests/test_child.py"],
+    )
+
+    assertKeys(
+      "uv at a locked root",
+      uv.projects(ws.withWorkdir(lockDriftFixture)).keys,
+      [lockDriftFixture],
+    )
+    assertKeys("uv at an unlocked root", uv.projects(atRoot).keys, [])
+
+    # With no selection, the batches run the enclosing project, and a failure
+    # there is its own.
+    let insidePass = ws.withWorkdir(passFixture + "/tests")
+    run(ruff.projects(insidePass).batch.lint(insidePass))
+    run(mypy.projects(insidePass).batch.typeCheck(insidePass))
+    pytest.projects(insidePass).batch.test(insidePass)
+    run(
+      pytest.projects(insidePass).get(key: passFixture).tests(insidePass).batch.test(insidePass),
+    )
+    assertReports(
+      failureOf(mypy.projects(insideChild).batch.typeCheck(insideChild)),
+      [nestedChildFixture],
+      [nestedFixture],
+    )
+    null
+  }
+
+  let assertKeys(what: String!, got: [String!]!, want: [String!]!): Void {
+    assert(got == want, what + ": got [" + got.join(", ") + "], want [" + want.join(", ") + "]")
+  }
+
+  """
+  ruff's projects form a collection keyed by project root: get and subset stay
+  within the keys, a subset
   batch runs only its own projects, and every failing project is reported.
   """
   ruffCollectionCheck(ws: Workspace!): Void @check {
@@ -896,14 +1022,6 @@ type E2e {
       "list did not return one project per key, in key order",
     )
 
-    # Keys start at the cwd: an enclosing project is not this call's business.
-    let below = ruff.projects(ws.withWorkdir(nestedFixture)).keys
-    assert(
-      below == [nestedFixture, nestedChildFixture],
-      "keys from a project root were not that project and the one below it: " + below.join(", "),
-    )
-    let inside = ruff.projects(ws.withWorkdir(passFixture + "/tests")).keys
-    assert(inside.isEmpty, "keys from inside a project reported the enclosing one: " + inside.join(", "))
     assert(
       ruff.project(ws.withWorkdir(passFixture + "/tests"), passFixture + "/tests").path == passFixture,
       "lookup from inside a project did not resolve the enclosing one",
@@ -964,8 +1082,9 @@ type E2e {
 
     let batch = ruff.projects(ws).subset(keys: [passFixture, unformattedFixture]).batch.format(ws)
     assert(
-      batch.modifiedPaths == [unformattedFixture + "/wide.py"] and batch.addedPaths.isEmpty,
-      "the batch format did not return exactly the unformatted file: " + changedPaths(batch),
+      sameFiles(batch.modifiedPaths, [unformattedFixture + "/sub/narrow.py", unformattedFixture + "/wide.py"])
+        and batch.addedPaths.isEmpty,
+      "the batch format did not return exactly the unformatted files: " + changedPaths(batch),
     )
 
     let skipped = ruff(scope: ["!" + unformattedFixture]).project(ws, unformattedFixture).format(ws)
@@ -975,22 +1094,31 @@ type E2e {
     let fromProject = ws.withWorkdir(unformattedFixture)
     let local = ruff.projects(fromProject).batch.format(fromProject)
     assert(
-      local.modifiedPaths == ["wide.py"],
-      "a changeset from inside the project was not rooted at the cwd: " + changedPaths(local),
+      sameFiles(local.modifiedPaths, ["sub/narrow.py", "wide.py"]),
+      "a changeset from the project root was not rooted at the cwd: " + changedPaths(local),
     )
     let fromTestdata = ws.withWorkdir("testdata")
     let nested = ruff.project(fromTestdata, unformattedFixture).format(fromTestdata)
     assert(
-      nested.modifiedPaths == ["project-unformatted/wide.py"],
+      sameFiles(nested.modifiedPaths, ["project-unformatted/sub/narrow.py", "project-unformatted/wide.py"]),
       "a changeset from above the project was not rooted at the cwd: " + changedPaths(nested),
     )
-    let inside = ws.withWorkdir(passFixture + "/tests")
-    let above = { changedPaths(ruff.project(inside, passFixture).format(inside)) } rescue {
-      err: Error => err.message
-    }
+
+    # From inside a project, the enclosing project is the key, and its
+    # changeset holds the part below the cwd, which is all one applied there
+    # can reach.
+    let fromSub = ws.withWorkdir(unformattedFixture + "/sub")
+    let sub = ruff.projects(fromSub)
+    assert(sub.keys == [unformattedFixture], "keys from inside a project: " + sub.keys.join(", "))
+    let below = sub.batch.format(fromSub)
     assert(
-      above.contains("outside the workspace cwd"),
-      "a project above the cwd was formatted into the wrong place: " + above,
+      below.modifiedPaths == ["narrow.py"] and below.addedPaths.isEmpty,
+      "a changeset from inside the project did not hold just the part below the cwd: "
+        + changedPaths(below),
+    )
+    assert(
+      ruff.project(fromSub, unformattedFixture + "/sub").format(fromSub).modifiedPaths == ["narrow.py"],
+      "a project's own format from inside it was not rooted at the cwd",
     )
     null
   }
@@ -1116,6 +1244,11 @@ type E2e {
     assert(
       tests.keys == [broken, passing],
       "test file discovery found: " + tests.keys.join(", "),
+    )
+    assert(
+      pytest.project(ws, skipFixture).tests(ws).keys == ["tests/test_skipping.py"],
+      "a test file that declares no test was listed: "
+        + pytest.project(ws, skipFixture).tests(ws).keys.join(", "),
     )
     assert(
       pytest.project(ws, nestedFixture).tests(ws).keys == ["tests/test_parent.py"],

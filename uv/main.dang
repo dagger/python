@@ -77,8 +77,8 @@ type Uv {
   }
 
   """
-  Python projects at or below the working directory that have a uv.lock, keyed
-  by project root.
+  Python projects at or below the working directory, plus the one enclosing
+  it, that have a uv.lock, keyed by project root.
 
   A project without a lockfile is left alone: nothing here pushes a project
   into adopting uv locking that has not asked for it.
@@ -86,11 +86,10 @@ type Uv {
   projects(ws: Workspace!, includeSkipped: Boolean! = true): UvProjects! {
     UvProjects(
       paths: lib
-        .rootsWithinCwd(ws)
-        .map { root => uvProject(root) }.{{path, skipLock, skipAudit, locked: hasLockfile(ws)}}
+        .rootsWith(ws, "uv.lock")
+        .map { root => uvProject(root) }.{{path, skipLock, skipAudit}}
         .filter { project =>
-          project.locked
-            and (includeSkipped or project.skipLock == false or project.skipAudit == false)
+          includeSkipped or project.skipLock == false or project.skipAudit == false
         }
         .map { project => project.path },
       tool: self,
@@ -116,13 +115,26 @@ type Uv {
     # Snapshot each project through the same source boundary its lock container
     # gets, so a lockfile that is already current reads as part of the baseline
     # instead of as a newly added file.
+    # A project enclosing the cwd contributes only the part below the cwd,
+    # which is all a changeset applied there can hold. Its uv.lock sits above
+    # the cwd, so run `dagger generate` from the project root to refresh it.
     let before = roots.reduce(directory) { before, root =>
       let project = lib.at(root)
-      before.withDirectory(project.cwdPath(ws), project.source(ws).directory(root))
+      let sub = project.cwdSubpath(ws)
+      before.withDirectory(
+        project.cwdPath(ws),
+        project.source(ws).directory(if (sub == ".") { root } else {
+          project.subpath(sub)
+        }),
+      )
     }
     roots
       .reduce(before) { after, root =>
-        after.withDirectory(lib.at(root).cwdPath(ws), uvProject(root).lockExec(ws).directory("."))
+        let project = lib.at(root)
+        after.withDirectory(
+          project.cwdPath(ws),
+          uvProject(root).lockExec(ws).directory(project.cwdSubpath(ws)),
+        )
       }
       .changes(before)
   }

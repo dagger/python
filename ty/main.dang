@@ -78,15 +78,15 @@ type Ty {
   }
 
   """
-  Python projects at or below the working directory that hold Python source of
-  their own, keyed by project root.
+  Python projects at or below the working directory, plus the one enclosing
+  it, that hold Python source of their own, keyed by project root.
   """
   projects(ws: Workspace!, includeSkipped: Boolean! = true): TyProjects! {
     TyProjects(
       paths: lib
-        .rootsWithinCwd(ws)
-        .map { root => tyProject(root) }.{{path, skip, sources: hasSources(ws)}}
-        .filter { project => project.sources and (includeSkipped or project.skip == false) }
+        .rootsOwning(ws, ["*.py"])
+        .map { root => tyProject(root) }.{{path, skip}}
+        .filter { project => includeSkipped or project.skip == false }
         .map { project => project.path },
       tool: self,
     )
@@ -172,7 +172,7 @@ type TyProject {
   project nested inside it.
   """
   hasSources(ws: Workspace!): Boolean! {
-    tool.lib.at(path).hasOwnFiles(ws, ["**/*.py"])
+    tool.lib.at(path).hasOwnFiles(ws, ["*.py"])
   }
 
   """

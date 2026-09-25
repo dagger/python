@@ -87,12 +87,13 @@ type Ruff {
   }
 
   """
-  Python projects at or below the working directory, keyed by project root.
+  Python projects at or below the working directory, plus the one enclosing
+  it, keyed by project root.
   """
   projects(ws: Workspace!, includeSkipped: Boolean! = true): RuffProjects! {
     RuffProjects(
       paths: lib
-        .rootsWithinCwd(ws)
+        .roots(ws)
         .map { root => ruffProject(root) }
         .filter { project => includeSkipped or project.skip == false }
         .map { project => project.path },
@@ -118,15 +119,26 @@ type Ruff {
   let changes(ws: Workspace!, roots: [String!]!, command: [String!]!): Changeset! {
     # Snapshot each project through the same source boundary its container
     # gets, so an unchanged file reads as part of the baseline.
+    # A project enclosing the cwd contributes only the part below the cwd,
+    # which is all a changeset applied there can hold.
     let before = roots.reduce(directory) { before, root =>
       let project = lib.at(root)
-      before.withDirectory(project.cwdPath(ws), project.source(ws).directory(root))
+      let sub = project.cwdSubpath(ws)
+      before.withDirectory(
+        project.cwdPath(ws),
+        project.source(ws).directory(if (sub == ".") { root } else {
+          project.subpath(sub)
+        }),
+      )
     }
     roots
       .reduce(before) { after, root =>
+        let project = lib.at(root)
         after.withDirectory(
-          lib.at(root).cwdPath(ws),
-          ruffProject(root).ruffExec(ws, command).directory("."),
+          project.cwdPath(ws),
+          ruffProject(root).ruffExec(ws, command).directory(
+            project.cwdSubpath(ws),
+          ),
         )
       }
       .changes(before)
