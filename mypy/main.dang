@@ -22,14 +22,14 @@ type Mypy {
   """
   Python version used for the default base image. Null when a custom base is set.
   """
-  pub version: String {
+  version: String {
     lib.version
   }
 
   """
   Project roots to check ("!" excludes; see the `scope` constructor argument).
   """
-  pub scope: [String!]! = ["**"]
+  scope: [String!]! = ["**"]
 
   """
   mypy version used for a project that pins none of its own.
@@ -38,7 +38,7 @@ type Mypy {
   is newest on the day it runs, so a check starts failing on a day nobody
   touched any code.
   """
-  pub defaultVersion: String! = "2.3.1"
+  defaultVersion: String! = "2.3.1"
 
   let pythonVersion: String
   let base: Container
@@ -78,13 +78,12 @@ type Mypy {
   """
   Type check every discovered project that holds Python source of its own.
   """
-  pub checkAll(ws: Workspace!): Void @check {
+  checkAll(ws: Workspace!): Void @check {
     # FIXME: aggregating into one directory and syncing reports only the first
     # failure. The fix belongs in Dang, which has no structured concurrency
     # primitive; dagger/go, ruff and pytest all carry this same shape.
     lib
-      .projects(ws)
-      .{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
+      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
       .filter { project => project.within and project.chosen and project.sources }
       .map { project => project.path }
       .reduce(directory) { layers, path =>
@@ -101,7 +100,7 @@ type Mypy {
   Type check one project. A project the caller deselected, or one holding no
   Python source of its own, is not checked.
   """
-  pub checkProject(ws: Workspace!, path: String!): Void {
+  checkProject(ws: Workspace!, path: String!): Void {
     let project = lib.project(ws, path)
     if (project.selected(scope) and project.hasOwnFiles(ws, ["**/*.py"])) {
       checkContainer(ws, project.path).sync
@@ -112,7 +111,7 @@ type Mypy {
   """
   The mypy version used for a project: what it pins, else the default.
   """
-  pub versionFor(ws: Workspace!, path: String!): String! {
+  versionFor(ws: Workspace!, path: String!): String! {
     lib.project(ws, path).toolVersion(ws, "mypy") ?? defaultVersion
   }
 
@@ -123,9 +122,7 @@ type Mypy {
     # is the same one pytest and the other checker get.
     project
       .env(ws, with: packages)
-      .withExec(
-        ["uv", "run"] + project.withFlags(packages) + ["mypy", "."] +
-          project.excludeNestedFlags(ws, "--exclude", regex: true),
-      )
+      .withExec(["uv", "run"] + project.withFlags(packages) + ["mypy", "."]
+        + project.excludeNestedFlags(ws, "--exclude", regex: true))
   }
 }

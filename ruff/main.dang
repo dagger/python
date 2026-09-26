@@ -28,12 +28,12 @@ type Ruff {
   """
   Project roots to check ("!" excludes; see the `scope` constructor argument).
   """
-  pub scope: [String!]! = ["**"]
+  scope: [String!]! = ["**"]
 
   """
   Extra arguments forwarded to every ruff invocation.
   """
-  pub args: [String!]! = []
+  args: [String!]! = []
 
   let container: Container
 
@@ -79,7 +79,7 @@ type Ruff {
   """
   The base every ruff command runs on: Alpine, the pinned binary, and a cache.
   """
-  pub base: Container! {
+  base: Container! {
     container ?? alpine
       .withEnvVariable("RUFF_CACHE_DIR", "/root/.cache/ruff")
       .withMountedCache("/root/.cache/ruff", cacheVolume("ruff-cache"))
@@ -89,7 +89,7 @@ type Ruff {
   """
   Lint every discovered project, and fail on a violation.
   """
-  pub checkAll(ws: Workspace!): Void @check {
+  checkAll(ws: Workspace!): Void @check {
     # FIXME: aggregating into one directory and syncing reports only the first
     # failure. The fix belongs in Dang, which has no structured concurrency
     # primitive; dagger/go and every module here carry this same shape.
@@ -104,10 +104,13 @@ type Ruff {
   """
   Format every discovered project and return the changes.
   """
-  pub formatAll(ws: Workspace!): Changeset! @generate {
+  formatAll(ws: Workspace!): Changeset! @generate {
     let paths = selectedPaths(ws)
     let before = paths.reduce(directory) { before, path =>
-      before.withDirectory(path, lib.project(ws, path, findUp: false).source(ws).directory(path))
+      before.withDirectory(
+        path,
+        lib.project(ws, path, findUp: false).source(ws).directory(path),
+      )
     }
     paths
       .reduce(before) { after, path =>
@@ -119,7 +122,7 @@ type Ruff {
   """
   Lint one project, and fail on a violation.
   """
-  pub checkProject(ws: Workspace!, path: String!): Void {
+  checkProject(ws: Workspace!, path: String!): Void {
     let project = lib.project(ws, path)
     if (project.selected(scope)) {
       checkContainer(ws, project.path).sync
@@ -133,17 +136,20 @@ type Ruff {
   Uses --exit-zero, so a violation ruff cannot fix does not fail the call. A
   real tool error, such as a broken config, still does.
   """
-  pub fixProject(ws: Workspace!, path: String!): Changeset! {
+  fixProject(ws: Workspace!, path: String!): Changeset! {
     let project = lib.project(ws, path)
     let fixed = workContainer(ws, project.path)
-      .withExec(["ruff", "check", "--fix", "--exit-zero"] + args + excludeNested(ws, project.path))
+      .withExec(["ruff", "check", "--fix", "--exit-zero"] + args + excludeNested(
+        ws,
+        project.path,
+      ))
     changesetFor(ws, project.path, fixed)
   }
 
   """
   Format one project and return the changes.
   """
-  pub formatProject(ws: Workspace!, path: String!): Changeset! {
+  formatProject(ws: Workspace!, path: String!): Changeset! {
     let project = lib.project(ws, path)
     changesetFor(ws, project.path, formatContainer(ws, project.path))
   }
@@ -161,14 +167,13 @@ type Ruff {
   """
   The version of the bundled ruff binary.
   """
-  pub version: String! {
+  version: String! {
     base.withExec(["ruff", "--version"]).stdout
   }
 
   let selectedPaths(ws: Workspace!): [String!]! {
     lib
-      .projects(ws)
-      .{{path, within: withinCwd(ws), chosen: selected(scope)}}
+      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope)}}
       .filter { project => project.within and project.chosen }
       .map { project => project.path }
   }
@@ -190,10 +195,16 @@ type Ruff {
   }
 
   let checkContainer(ws: Workspace!, path: String!): Container! {
-    workContainer(ws, path).withExec(["ruff", "check"] + args + excludeNested(ws, path))
+    workContainer(ws, path).withExec(["ruff", "check"] + args + excludeNested(
+      ws,
+      path,
+    ))
   }
 
   let formatContainer(ws: Workspace!, path: String!): Container! {
-    workContainer(ws, path).withExec(["ruff", "format"] + args + excludeNested(ws, path))
+    workContainer(ws, path).withExec(["ruff", "format"] + args + excludeNested(
+      ws,
+      path,
+    ))
   }
 }

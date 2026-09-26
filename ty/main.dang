@@ -24,14 +24,14 @@ type Ty {
   """
   Python version used for the default base image. Null when a custom base is set.
   """
-  pub version: String {
+  version: String {
     lib.version
   }
 
   """
   Project roots to check ("!" excludes; see the `scope` constructor argument).
   """
-  pub scope: [String!]! = ["**"]
+  scope: [String!]! = ["**"]
 
   """
   ty version used for a project that pins none of its own.
@@ -40,7 +40,7 @@ type Ty {
   newest on the day it runs, which matters more here than for a stable tool
   because ty is still before 1.0 and its diagnostics still move.
   """
-  pub defaultVersion: String! = "0.0.78"
+  defaultVersion: String! = "0.0.78"
 
   let pythonVersion: String
   let base: Container
@@ -80,13 +80,12 @@ type Ty {
   """
   Type check every discovered project that holds Python source of its own.
   """
-  pub checkAll(ws: Workspace!): Void @check {
+  checkAll(ws: Workspace!): Void @check {
     # FIXME: aggregating into one directory and syncing reports only the first
     # failure. The fix belongs in Dang, which has no structured concurrency
     # primitive; dagger/go, ruff and pytest all carry this same shape.
     lib
-      .projects(ws)
-      .{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
+      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope), sources: hasOwnFiles(ws, ["**/*.py"])}}
       .filter { project => project.within and project.chosen and project.sources }
       .map { project => project.path }
       .reduce(directory) { layers, path =>
@@ -103,7 +102,7 @@ type Ty {
   Type check one project. A project the caller deselected, or one holding no
   Python source of its own, is not checked.
   """
-  pub checkProject(ws: Workspace!, path: String!): Void {
+  checkProject(ws: Workspace!, path: String!): Void {
     let project = lib.project(ws, path)
     if (project.selected(scope) and project.hasOwnFiles(ws, ["**/*.py"])) {
       checkContainer(ws, project.path).sync
@@ -114,7 +113,7 @@ type Ty {
   """
   The ty version used for a project: what it pins, else the default.
   """
-  pub versionFor(ws: Workspace!, path: String!): String! {
+  versionFor(ws: Workspace!, path: String!): String! {
     lib.project(ws, path).toolVersion(ws, "ty") ?? defaultVersion
   }
 
@@ -125,9 +124,7 @@ type Ty {
     # is the same one pytest and the other checker get.
     project
       .env(ws, with: packages)
-      .withExec(
-        ["uv", "run"] + project.withFlags(packages) + ["ty", "check"] +
-          project.excludeNestedFlags(ws, "--exclude", regex: false),
-      )
+      .withExec(["uv", "run"] + project.withFlags(packages) + ["ty", "check"]
+        + project.excludeNestedFlags(ws, "--exclude", regex: false))
   }
 }

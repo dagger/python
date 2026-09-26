@@ -33,29 +33,29 @@ type Pytest {
   """
   Python version used for the default base image. Null when a custom base is set.
   """
-  pub version: String {
+  version: String {
     lib.version
   }
 
   """
   Project roots to test ("!" excludes; see the `scope` constructor argument).
   """
-  pub scope: [String!]! = ["**"]
+  scope: [String!]! = ["**"]
 
   """
   Extra arguments forwarded to pytest, for example ["-x", "--tb=short"].
   """
-  pub args: [String!]! = ["-v"]
+  args: [String!]! = ["-v"]
 
   """
   pytest version used for a project that pins none of its own.
   """
-  pub defaultVersion: String! = "9.1.1"
+  defaultVersion: String! = "9.1.1"
 
   """
   Whether to load the bundled OpenTelemetry plugin.
   """
-  pub tracing: Boolean! = true
+  tracing: Boolean! = true
 
   """
   Whether tests may talk to a nested Dagger engine.
@@ -68,7 +68,7 @@ type Pytest {
   This grants the tests access to Dagger, not to the host. Turn it off to run
   test code you do not trust.
   """
-  pub nesting: Boolean! = true
+  nesting: Boolean! = true
 
   let pythonVersion: String
   let base: Container
@@ -124,7 +124,7 @@ type Pytest {
   """
   The bundled pytest_otel plugin, for a caller wiring up its own container.
   """
-  pub pytestOtel: Directory! {
+  pytestOtel: Directory! {
     currentModule.source.directory("pytest_otel")
   }
 
@@ -135,13 +135,12 @@ type Pytest {
   on an empty collection, so running it there would fail a project whose only
   fault is having no tests yet.
   """
-  pub testAll(ws: Workspace!): Void @check {
+  testAll(ws: Workspace!): Void @check {
     # FIXME: aggregating into one directory and syncing reports only the first
     # failure. The fix belongs in Dang, which has no structured concurrency
     # primitive; dagger/go and every module here carry this same shape.
     lib
-      .projects(ws)
-      .{{path, within: withinCwd(ws), chosen: selected(scope), tests: hasOwnFiles(ws, testPatterns)}}
+      .projects(ws).{{path, within: withinCwd(ws), chosen: selected(scope), tests: hasOwnFiles(ws, testPatterns)}}
       .filter { project => project.within and project.chosen and project.tests }
       .map { project => project.path }
       .reduce(directory) { layers, path =>
@@ -155,7 +154,7 @@ type Pytest {
   Test one project. A project the caller deselected, or one with no test files
   of its own, is not run.
   """
-  pub testProject(ws: Workspace!, path: String!): Void {
+  testProject(ws: Workspace!, path: String!): Void {
     let project = lib.project(ws, path)
     if (project.selected(scope) and project.hasOwnFiles(ws, testPatterns)) {
       testContainer(ws, project.path).sync
@@ -167,14 +166,14 @@ type Pytest {
   Whether a project holds test files of its own, rather than only in a project
   nested inside it.
   """
-  pub hasTests(ws: Workspace!, path: String!): Boolean! {
+  hasTests(ws: Workspace!, path: String!): Boolean! {
     lib.project(ws, path).hasOwnFiles(ws, testPatterns)
   }
 
   """
   The pytest version used for a project: what it pins, else the default.
   """
-  pub versionFor(ws: Workspace!, path: String!): String! {
+  versionFor(ws: Workspace!, path: String!): String! {
     lib.project(ws, path).toolVersion(ws, "pytest") ?? defaultVersion
   }
 
