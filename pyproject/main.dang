@@ -21,7 +21,7 @@ type Pyproject {
   Required and never defaulted. The library owns the matching; the caller owns
   what counts as a project.
   """
-  pub markers: [String!]!
+  markers: [String!]!
 
   """
   Workspace paths that no project discovers through, mounts, or scans.
@@ -29,18 +29,18 @@ type Pyproject {
   A virtualenv vendors hundreds of third-party manifests and not one of them is
   a project of this workspace. The caches below only ever slow a mount down.
   """
-  pub exclude: [String!]!
+  exclude: [String!]!
 
   """
   Extra workspace-root include patterns mounted for every project, for shared
   config or fixture data that lives outside the project directory.
   """
-  pub includeExtraFiles: [String!]!
+  includeExtraFiles: [String!]!
 
   """
   Python version of the default base image. Null when a custom base is set.
   """
-  pub version: String
+  version: String
 
   """
   Base image every project container is built from, with uv already on PATH.
@@ -49,7 +49,7 @@ type Pyproject {
   that matters: it is a standalone binary, it reaches the same verdicts with no
   interpreter present, and an environment would only make it slower.
   """
-  pub base: Container!
+  base: Container!
 
   new(
     """
@@ -71,6 +71,7 @@ type Pyproject {
       "**/.ruff_cache/**",
       "**/*.egg-info/**",
     ],
+
     """
     Extra workspace-root include patterns mounted for every project.
     """
@@ -135,7 +136,7 @@ type Pyproject {
   Projects discovered at or below the workspace cwd, plus the enclosing project
   when the cwd is inside one. Paths are workspace-root-relative.
   """
-  pub projects(ws: Workspace!): [PythonProject!]! {
+  projects(ws: Workspace!): [PythonProject!]! {
     ws
       .findRoots(markers: markers, exclude: exclude)
       .map { root => workspaceRootPath(ws, root) }
@@ -150,7 +151,7 @@ type Pyproject {
   taken as a project root and no lookup happens, which is what lets a caller
   ask about a root that does not exist on disk.
   """
-  pub project(ws: Workspace!, path: String!, findUp: Boolean! = true): PythonProject! {
+  project(ws: Workspace!, path: String!, findUp: Boolean! = true): PythonProject! {
     at(if (findUp) { findRootUp(ws, path) } else { normalize(path) })
   }
 
@@ -177,8 +178,8 @@ type Pyproject {
       .map { found => parentPath(found.trimPrefix("/")) }
 
     if (roots.isEmpty) {
-      raise "no project found containing path: " + path +
-        " (markers: " + markers.join(", ") + ")"
+      raise "no project found containing path: " + path
+        + " (markers: " + markers.join(", ") + ")"
     }
 
     # "." is the only root at depth 0, so it never loses to the seed.
@@ -228,23 +229,23 @@ type PythonProject {
   """
   Workspace-relative path of this project root.
   """
-  pub path: String!
+  path: String!
 
   """
   Files whose presence marks a directory as a project root, inherited from the
   library. Nested-project detection uses the same markers that found this one.
   """
-  pub markers: [String!]!
+  markers: [String!]!
 
   """
   Workspace paths this project never mounts or scans.
   """
-  pub exclude: [String!]!
+  exclude: [String!]!
 
   """
   Extra workspace-root include patterns mounted for this project's commands.
   """
-  pub includeExtraFiles: [String!]!
+  includeExtraFiles: [String!]!
 
   """
   Base image this project's containers are built from.
@@ -254,7 +255,7 @@ type PythonProject {
   """
   A workspace-root path for a project-relative subpath.
   """
-  pub subpath(relativePath: String!): String! {
+  subpath(relativePath: String!): String! {
     if (path == ".") { relativePath } else { path.trimSuffix("/") + "/" + relativePath }
   }
 
@@ -270,13 +271,14 @@ type PythonProject {
   These are dagger/go's selection rules verbatim. Consistency across the two
   module families is worth more here than any improvement.
   """
-  pub selected(patterns: [String!]!): Boolean! {
+  selected(patterns: [String!]!): Boolean! {
     let selecting = patterns.reject { pattern => pattern.hasPrefix("!") }
-    let excluding = patterns.filter { pattern => pattern.hasPrefix("!") }
+    let excluding = patterns
+      .filter { pattern => pattern.hasPrefix("!") }
       .map { pattern => pattern.trimPrefix("!") }
 
-    (selecting.isEmpty or selecting.any { pattern => matches(pattern) }) and
-      excluding.any { pattern => matches(pattern) } == false
+    (selecting.isEmpty or selecting.any { pattern => matches(pattern) })
+      and excluding.any { pattern => matches(pattern) } == false
   }
 
   """
@@ -300,7 +302,7 @@ type PythonProject {
   usually does not want to run there: from `work/app`, a fault in the ancestor
   `work` is not this call's business.
   """
-  pub withinCwd(ws: Workspace!): Boolean! {
+  withinCwd(ws: Workspace!): Boolean! {
     let cwd = ws.cwd.split("/").reject { segment => segment == "" or segment == "." }.join("/")
     cwd == "" or path == cwd or path.hasPrefix(cwd + "/")
   }
@@ -312,7 +314,7 @@ type PythonProject {
   this project mounts those subtrees -- uv workspace members are path
   dependencies -- but keeps them out of its own commands.
   """
-  pub nestedProjects(ws: Workspace!): [String!]! {
+  nestedProjects(ws: Workspace!): [String!]! {
     let tree = ws.directory("/", include: markerPatterns, exclude: exclude)
     markers
       .reduce([]) { found, marker =>
@@ -336,7 +338,7 @@ type PythonProject {
   Patterns are project-relative, so a caller asks for ["**/test_*.py"] and
   never has to know where the project sits in the workspace.
   """
-  pub hasOwnFiles(ws: Workspace!, patterns: [String!]!): Boolean! {
+  hasOwnFiles(ws: Workspace!, patterns: [String!]!): Boolean! {
     let scoped = patterns.map { pattern => subpath(pattern) }
     let tree = ws.directory("/", include: scoped, exclude: exclude)
     let nested = nestedProjects(ws)
@@ -349,7 +351,7 @@ type PythonProject {
   """
   Whether this project holds a file at a project-relative path.
   """
-  pub hasFile(ws: Workspace!, relativePath: String!): Boolean! {
+  hasFile(ws: Workspace!, relativePath: String!): Boolean! {
     ws.directory("/", include: [subpath(relativePath)]).glob(subpath(relativePath)).isEmpty == false
   }
 
@@ -361,21 +363,21 @@ type PythonProject {
   and fixture data are loaded at runtime where no import analysis would see
   them.
   """
-  pub includeBase: [String!]! {
+  includeBase: [String!]! {
     [subpath("**")]
   }
 
   """
   Final workspace include patterns used to build this project's source.
   """
-  pub include: [String!]! {
+  include: [String!]! {
     includeBase + includeExtraFiles
   }
 
   """
   Workspace source mounted for this project's commands.
   """
-  pub source(ws: Workspace!): Directory! {
+  source(ws: Workspace!): Directory! {
     ws.directory("/", include: include, exclude: exclude)
   }
 
@@ -385,7 +387,7 @@ type PythonProject {
   Every tool that needs a Python runtime starts here, so a workspace does not
   build one container per tool where one would do.
   """
-  pub container(ws: Workspace!): Container! {
+  container(ws: Workspace!): Container! {
     baseImage
       .withWorkdir("/ws")
       .withDirectory(".", source(ws))
@@ -408,7 +410,7 @@ type PythonProject {
   resolves nothing, so a conflict passes unnoticed. A conflict now fails here,
   while building the environment.
   """
-  pub env(ws: Workspace!, with: [String!]! = []): Container! {
+  env(ws: Workspace!, with: [String!]! = []): Container! {
     let synced = container(ws).withExec(["uv", "sync"])
     if (with.isEmpty) {
       synced
@@ -423,7 +425,7 @@ type PythonProject {
   A caller runs its own command with the same flags, against the resolution
   `env` already made and cached.
   """
-  pub withFlags(packages: [String!]!): [String!]! {
+  withFlags(packages: [String!]!): [String!]! {
     packages.reduce([]) { flags, package => flags + ["--with", package] }
   }
 
@@ -435,7 +437,7 @@ type PythonProject {
   "sdk-v1.2" would otherwise also exclude a sibling "sdk-v1X2". `regex` picks
   which escaping the pattern needs.
   """
-  pub excludeNestedFlags(ws: Workspace!, flag: String!, regex: Boolean!): [String!]! {
+  excludeNestedFlags(ws: Workspace!, flag: String!, regex: Boolean!): [String!]! {
     nestedProjects(ws).reduce([]) { flags, dir =>
       flags + [flag, if (regex) { "^" + Regexp.escape(dir) + "/" } else { quoteGlob(dir) + "/" }]
     }
@@ -463,7 +465,7 @@ type PythonProject {
   Without this, `uv run --with mypy` resolves to whatever mypy shipped that
   morning, and a check starts failing on a day nobody touched any code.
   """
-  pub toolVersion(ws: Workspace!, tool: String!): String {
+  toolVersion(ws: Workspace!, tool: String!): String {
     lockedVersion(ws, tool) ?? requiredVersion(ws, tool)
   }
 
@@ -492,9 +494,9 @@ type PythonProject {
   The version of `tool` this project declares with required-version, if any.
   """
   let requiredVersion(ws: Workspace!, tool: String!): String {
-    declaredIn(ws, "pyproject.toml", "tool." + tool) ??
-      declaredIn(ws, tool + ".toml", "") ??
-      declaredIn(ws, "." + tool + ".toml", "")
+    declaredIn(ws, "pyproject.toml", "tool." + tool)
+      ?? declaredIn(ws, tool + ".toml", "")
+        ?? declaredIn(ws, "." + tool + ".toml", "")
   }
 
   """

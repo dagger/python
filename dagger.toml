@@ -1,29 +1,42 @@
 [modules.dagger-dang-sdk]
 source = "github.com/dagger/dang-sdk"
 
-[modules.dagger-dang-sdk.as-sdk]
-name = "dang"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = "pyproject"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = "uv"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = "mypy"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = "ty"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = "ruff"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = "pytest"
-
-[[modules.dagger-dang-sdk.as-sdk.modules]]
-path = ".dagger/modules/e2e"
-
 [modules.e2e]
 source = ".dagger/modules/e2e"
+
+[sdks.dang]
+module = "dagger-dang-sdk"
+
+[sdks.dang.scopes."pyproject"]
+is-module = true
+name = "pyproject"
+
+[sdks.dang.scopes."uv"]
+is-module = true
+name = "uv"
+clients = ["./pyproject"]
+
+[sdks.dang.scopes."mypy"]
+is-module = true
+name = "mypy"
+clients = ["./pyproject"]
+
+[sdks.dang.scopes."ty"]
+is-module = true
+name = "ty"
+clients = ["./pyproject"]
+
+[sdks.dang.scopes."ruff"]
+is-module = true
+name = "ruff"
+clients = ["./pyproject"]
+
+[sdks.dang.scopes."pytest"]
+is-module = true
+name = "pytest"
+clients = ["./pyproject"]
+
+[sdks.dang.scopes.".dagger/modules/e2e"]
+is-module = true
+name = "e2e"
+clients = ["./pyproject", "./uv", "./mypy", "./ty", "./ruff", "./pytest"]
