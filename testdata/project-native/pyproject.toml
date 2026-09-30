@@ -1,0 +1,13 @@
+[project]
+name = "project-native"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+# Installing this project compiles a C extension, which needs a compiler the
+# default base image does not have. A type checker never installs it.
+[build-system]
+requires = ["setuptools>=74"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+ext-modules = [{ name = "native._speed", sources = ["src/native/_speed.c"] }]
