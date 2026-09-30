@@ -51,8 +51,8 @@ second one under it, `pytest-test-file`, keyed by test file. For a repository
 with projects `app` and `libs/core`:
 
 ```console
-$ dagger list -a ruff-projects
-$ dagger list -a pytest-test-files --pytest-project=app
+$ dagger list ruff-projects -a
+$ dagger list pytest-test-files --pytest-project=app -a
 $ dagger check --ruff --check lint --ruff-project=app
 $ dagger check --check type-check              # mypy and ty together
 $ dagger check --pytest --pytest-project=app --pytest-test-file=tests/test_api.py
@@ -139,25 +139,42 @@ source outside the declaring project stays a project of its own.
 
 ### The Python environment
 
-mypy, ty and pytest run in the project's own environment, built with uv in two
+mypy, ty and pytest run in the project's own environment, built with uv in
 steps:
 
 1. `uv sync --locked --no-install-workspace --no-install-local`, with only the
-   files uv reads mounted: every `pyproject.toml` in the project, its
-   `uv.lock`, `.python-version` and `uv.toml`. The tool itself (`mypy==…`,
-   `pytest==…` and the bundled `pytest_otel` plugin) is resolved against those
-   dependencies in the same step.
-2. The source is mounted and `uv sync --locked` installs the project and its
-   local path dependencies.
+   files uv reads mounted: the project's `pyproject.toml`, `uv.lock`,
+   `.python-version` and `uv.toml`, and the `pyproject.toml` of each uv
+   workspace member or path source it owns. The three tools share this layer.
+2. The tool is resolved against those dependencies: `mypy==…`, `ty==…`, or
+   `pytest==…` with the bundled `pytest_otel` plugin.
+3. The source is mounted. For pytest, `uv sync --locked` then installs the
+   project and its local path dependencies. mypy and ty skip the project
+   itself — they read first-party code from the source — and install only its
+   uv workspace members and path sources, when it has any.
 
-A source edit leaves the first step cached, so only the project itself is
-reinstalled. `--locked` is dropped for a project with no `uv.lock`; with one, a
-stale lockfile fails the environment rather than being re-resolved behind the
+A source edit leaves steps 1 and 2 cached. For mypy and ty nothing is
+installed after it, so only the checker runs again, and a project whose build
+needs a compiler or a slow build backend is type checked without one. An edit
+to an unrelated project's `pyproject.toml`, or to the workspace's
+`dagger.toml` or `dagger.lock`, which are never mounted as project source,
+leaves the environment cached too.
+
+`--locked` is dropped for a project with no `uv.lock`; with one, a stale
+lockfile fails the environment rather than being re-resolved behind the
 check's back — `dagger generate --uv` refreshes it. `.git` is not mounted,
 except for a project whose version comes from version control
 (setuptools-scm, hatch-vcs and the like), which cannot be built without it.
-The default base image has git, for dependencies sourced from a git
-repository.
+
+The default base is `python:<version>-slim` with git, for dependencies
+sourced from a git repository, and no C/C++ compiler: a compiler would add
+several hundred megabytes to every tool's image, and only a project that
+builds a native extension, under pytest, needs one. For such a project, give
+pytest a base that has one:
+
+```console
+$ dagger settings pytest base ghcr.io/astral-sh/uv:python3.14-bookworm
+```
 
 A failure names the step: the environment, or the tool, with its command, exit
 code and the end of its output.
@@ -245,7 +262,10 @@ meant to be linted, and fails on it.
 
 A project outside the scope is still a key, so `dagger list` shows the whole
 workspace and addresses do not move when the settings change; its checks and
-generators do nothing, and pytest lists no test files for it. `uv` needs this:
+generators do nothing, and pytest lists no test files for it. Its checks
+report as passed: a check has no way yet to report itself skipped. Narrow a
+run with a dimension flag, such as `--mypy-project=app`, to leave it out of
+the report. `uv` needs this:
 its one set of keys serves both `lock` and `audit`, which select separately.
 Pass `includeSkipped: false` to `projects` to leave such projects out.
 
@@ -277,8 +297,11 @@ generator and has no staleness check: a fixable violation already fails `lint`.
 ruff runs the release the project pins: the `ruff` version in its `uv.lock`,
 else an exact `required-version` in `ruff.toml`, `.ruff.toml` or
 `[tool.ruff]` in `pyproject.toml`. That release's binary comes from its
-official image, `ghcr.io/astral-sh/ruff:<version>`. A project pinning nothing,
-or only a range, gets the bundled release (0.16.5). A project's `version`
+official image, `ghcr.io/astral-sh/ruff:<version>`. A project pinning nothing gets
+the bundled release (0.16.5), and so does one whose `required-version` is a
+range the bundled release satisfies, such as `>=0.15`. A range it does not
+satisfy fails with a message asking for an exact `required-version` or a
+`uv.lock` pin, rather than ruff's own version-mismatch error. A project's `version`
 reports the ruff that runs on it; the module's `version` reports the bundled
 one. A custom `container` is used as it is, pins or not. Either way ruff's
 cache lives in a cache volume, never in the project.
@@ -372,9 +395,11 @@ On a project: `audit` (a `@check`, `uv audit`), `lock` (a `@generate`,
 places each `dist` under its project root.
 
 `audit` runs `uv audit --locked` over the lockfile. To leave dependency groups
-out, pass uv's own flags: `["--no-dev"]` for the development group,
-`["--no-group", "typing"]` for one group, `["--no-default-groups"]` for all
-default groups.
+out, pass uv's own flags: `["--no-dev"]` for the `dev` group,
+`["--no-group", "typing"]` for one named group, `["--no-default-groups"]` for
+every group in `default-groups`. `--no-dev` leaves out only `dev`: a group a
+project adds to `default-groups`, such as flask's `typing`, needs
+`--no-group` or `--no-default-groups`.
 
 Locking is a `@generate` rather than a pass/fail check, so drift shows up in
 `dagger check`, as uv's `stale` check, *and* is repaired by `dagger generate`.
@@ -441,8 +466,11 @@ On a project:
 | `source`                 | The workspace source mounted for this project's commands.          |
 | `container`              | That source, on the base image, with the project root as workdir.  |
 | `dependencies`           | The base with the project's dependencies installed, from `install-inputs` alone. |
-| `env`                    | `dependencies` with the source mounted and the project installed.  |
-| `install-inputs`         | The files `uv sync` reads: `pyproject.toml`s, `uv.lock`, `.python-version`, `uv.toml`. |
+| `env`                    | `dependencies` with the source mounted and the project installed (or, with `installProject: false`, only its local members). |
+| `install-inputs`         | The files `uv sync` reads: the project's and its members' `pyproject.toml`, `uv.lock`, `.python-version`, `uv.toml`. |
+| `has-local-dependencies` | Whether the project has uv workspace members or path sources.      |
+| `required-spec`          | The `required-version` a project declares for a tool, exact or a range. |
+| `version-satisfies`      | Whether a version satisfies a PEP 440 specifier set.               |
 | `sync-flags`             | `--locked` when the project has a `uv.lock`.                       |
 | `uv-run`                 | The start of a `uv run` command for a tool in `env`.               |
 | `step`                   | Run a command, failing with its name, command, exit code and output. |

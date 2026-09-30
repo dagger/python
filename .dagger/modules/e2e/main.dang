@@ -480,6 +480,9 @@ type E2e {
   let mypyFilesFixture: String! = "testdata/project-mypy-files"
   let ruffLockedFixture: String! = "testdata/project-ruff-locked"
   let uvWorkspaceFixture: String! = "testdata/project-uv-workspace"
+  let nativeFixture: String! = "testdata/project-native"
+  let ruffRangeFixture: String! = "testdata/project-ruff-range"
+  let ruffRangeOldFixture: String! = "testdata/project-ruff-range-old"
 
   """
   Fixtures that are broken on purpose, left out so the batch checks
@@ -873,8 +876,34 @@ type E2e {
       "the dependency layer mounted source files",
     )
 
-    # .git never rides along with a project's source.
-    assert(lib.at(".").source(ws).glob(".git/*").isEmpty, "the project source mounted .git")
+    # .git and the workspace's Dagger config never ride along with a
+    # project's source, so a settings edit re-runs no install.
+    let rootSource = lib.at(".").source(ws)
+    assert(rootSource.glob(".git/*").isEmpty, "the project source mounted .git")
+    assert(
+      rootSource.glob("dagger.toml").isEmpty and rootSource.glob("dagger.lock").isEmpty,
+      "the project source mounted the workspace's Dagger config",
+    )
+
+    # The dependency layer reads the project's own pyproject.toml and those of
+    # the members it absorbs, never a nested project's.
+    assertKeys(
+      "dependency inputs of a project with a nested project",
+      lib.project(ws, nestedFixture).installInputs(ws).glob("**/pyproject.toml"),
+      [nestedFixture + "/pyproject.toml"],
+    )
+    let workspaceInputs = lib.project(ws, uvWorkspaceFixture).installInputs(ws).glob("**/pyproject.toml")
+    assert(
+      sameFiles(
+        workspaceInputs,
+        [
+          uvWorkspaceFixture + "/pyproject.toml",
+          uvWorkspaceFixture + "/packages/member-a/pyproject.toml",
+          uvWorkspaceFixture + "/tools/plugin/pyproject.toml",
+        ],
+      ),
+      "dependency inputs of a uv workspace: " + workspaceInputs.join(", "),
+    )
 
     # A stale lockfile fails the environment by name instead of being
     # re-resolved behind the check's back.
@@ -921,6 +950,18 @@ type E2e {
       "a mypy failure did not name the project, the step and the error: " + named,
     )
 
+    # A type checker does not install the project, so a native extension
+    # that needs a compiler the default base lacks does not stop it.
+    run(mypy.project(ws, nativeFixture).typeCheck(ws))
+    run(ty.project(ws, nativeFixture).typeCheck(ws))
+    let installed = { lib.project(ws, nativeFixture).env(ws).id; "built" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      installed.contains("environment failed (uv sync"),
+      "installing a native extension without a compiler did not fail: " + installed,
+    )
+
     let tyArgs = failureOf(
       ty(args: ["--definitely-not-a-flag"]).project(ws, passFixture).typeCheck(ws),
     )
@@ -954,6 +995,36 @@ type E2e {
       violation.contains("F401") and violation.contains("exit code 1"),
       "the pinned ruff did not report the lint violation: " + violation,
     )
+
+    # A required-version range runs the bundled release when it satisfies the
+    # range, and fails clearly when it does not.
+    run(ruff.project(ws, ruffRangeFixture).lint(ws))
+    let outOfRange = failureOf(ruff.project(ws, ruffRangeOldFixture).lint(ws))
+    assert(
+      outOfRange.contains("requires ruff >=0.4,<0.5") and outOfRange.contains("exact required-version"),
+      "an unsatisfied required-version range did not fail clearly: " + outOfRange,
+    )
+    let satisfied = [
+      ["0.16.5", ">=0.16,<1"],
+      ["0.6.9", "~=0.6.0"],
+      ["1.2.3", "==1.2.*"],
+      ["1.2", "==1.2.0"],
+      ["1.10.0", ">1.9"],
+      ["0.16.5", "0.16.5"],
+    ]
+    let unsatisfied = [
+      ["0.16.5", ">=0.4,<0.5"],
+      ["0.7.0", "~=0.6.0"],
+      ["1.3.0", "==1.2.*"],
+      ["2.0.0", "!=2.0"],
+      ["1.9.0", ">=1.10"],
+    ]
+    let wrong = satisfied.filter { pair =>
+      lib.at(".").versionSatisfies(pair.takeFirst(1).join(""), pair.takeLast(1).join("")) == false
+    } + unsatisfied.filter { pair =>
+      lib.at(".").versionSatisfies(pair.takeFirst(1).join(""), pair.takeLast(1).join(""))
+    }
+    assert(wrong.isEmpty, "version ranges misjudged: " + wrong.map { pair => pair.join(" ") }.join("; "))
 
     let custom = container
       .from("alpine:3.24.1")
@@ -1036,6 +1107,7 @@ type E2e {
     "!" + otelSource,
     "!" + lintFailFixture,
     "!" + ruffTomlFixture,
+    "!" + ruffRangeOldFixture,
   ]
 
   """
