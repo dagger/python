@@ -257,7 +257,8 @@ type RuffProject {
 
   """
   The ruff release this project pins in uv.lock or with an exact
-  required-version, or null when it pins none and the bundled one runs.
+  required-version, or null when it pins none. With none, the bundled release
+  runs, provided it satisfies any required-version range.
   """
   pinnedVersion(ws: Workspace!): String {
     tool.lib.at(path).toolVersion(ws, "ruff")
@@ -271,7 +272,21 @@ type RuffProject {
   }
 
   let ruffBase(ws: Workspace!): Container! {
-    tool.pinnedBase(pinnedVersion(ws))
+    let exact = pinnedVersion(ws)
+    let range = tool.lib.at(path).requiredSpec(ws, "ruff")
+    if (exact != null or range == null or tool.container != null) {
+      tool.pinnedBase(exact)
+    } else {
+      # A range pins no release, so the bundled one runs if it satisfies it.
+      let bundled = tool.version.trimSpace.trimPrefix("ruff ").trimSpace
+      if (tool.lib.at(path).versionSatisfies(bundled, range ?? "")) {
+        tool.base
+      } else {
+        raise "the project requires ruff " + (range ?? "") + ", which the bundled ruff "
+          + bundled + " does not satisfy: set an exact required-version, such as "
+          + "required-version = \"0.6.9\", or lock ruff in uv.lock"
+      }
+    }
   }
 
   """
@@ -280,7 +295,7 @@ type RuffProject {
   lint(ws: Workspace!): Void @check {
     let failure = lintFailure(ws)
     if (failure != null) {
-      raise path + ": " + failure
+      raise "ruff lint failed:\n- " + path + ": " + failure
     }
     null
   }
