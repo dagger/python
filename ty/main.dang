@@ -42,6 +42,11 @@ type Ty {
   """
   defaultVersion: String! = "0.0.78"
 
+  """
+  Extra arguments forwarded to every ty invocation, e.g. ["--strict"].
+  """
+  args: [String!]! = []
+
   let pythonVersion: String
   let base: Container
 
@@ -65,11 +70,16 @@ type Ty {
     ty version used for a project that pins none of its own.
     """
     defaultVersion: String! = "0.0.78",
+    """
+    Extra arguments forwarded to every ty invocation.
+    """
+    args: [String!]! = [],
   ) {
     self.pythonVersion = version
     self.base = base
     self.scope = scope
     self.defaultVersion = defaultVersion
+    self.args = args
     self
   }
 
@@ -189,7 +199,7 @@ type TyProject {
   typeCheck(ws: Workspace!): Void @check {
     let failure = typeCheckFailure(ws)
     if (failure != null) {
-      raise "ty type check failed in " + path + ": " + failure
+      raise path + ": " + failure
     }
     null
   }
@@ -203,7 +213,7 @@ type TyProject {
       null
     } else {
       { typeCheckExec(ws).sync; null } rescue {
-        err: Error => err.message
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
       }
     }
   }
@@ -213,9 +223,11 @@ type TyProject {
     let packages = ["ty==" + version(ws)]
     # The environment comes from the library, so the `uv sync` layer underneath
     # is the same one pytest and the other checker get.
-    project
-      .env(ws, with: packages)
-      .withExec(["uv", "run"] + project.withFlags(packages) + ["ty", "check"]
-        + project.excludeNestedFlags(ws, "--exclude", regex: false))
+    project.step(
+      project.env(ws, with: packages),
+      project.uvRun(packages) + ["ty", "check"] + tool.args
+        + project.excludeNestedFlags(ws, "--exclude", regex: false),
+      "ty",
+    )
   }
 }

@@ -41,6 +41,11 @@ type Uv {
   """
   audit: [String!]! = ["**"]
 
+  """
+  Extra arguments for `uv audit`, e.g. ["--no-dev"] or ["--no-group", "typing"].
+  """
+  auditArgs: [String!]! = []
+
   let pythonVersion: String
   let base: Container
 
@@ -64,11 +69,17 @@ type Uv {
     Project roots to audit. Same selection rules as `lock`.
     """
     audit: [String!]! = ["**"],
+    """
+    Extra arguments for `uv audit`, e.g. ["--no-dev"] to leave development
+    dependency groups out, or ["--no-group", "typing"] for one group.
+    """
+    auditArgs: [String!]! = [],
   ) {
     self.pythonVersion = version
     self.base = base
     self.lock = lock
     self.audit = audit
+    self.auditArgs = auditArgs
     self
   }
 
@@ -123,9 +134,11 @@ type Uv {
       let sub = project.cwdSubpath(ws)
       before.withDirectory(
         project.cwdPath(ws),
-        project.source(ws).directory(if (sub == ".") { root } else {
-          project.subpath(sub)
-        }),
+        project.source(ws).directory(
+          if (sub == ".") { root } else {
+            project.subpath(sub)
+          },
+        ),
       )
     }
     roots
@@ -235,7 +248,7 @@ type UvProject {
   audit(ws: Workspace!): Void @check {
     let failure = auditFailure(ws)
     if (failure != null) {
-      raise "uv audit failed in " + path + ": " + failure
+      raise path + ": " + failure
     }
     null
   }
@@ -249,7 +262,7 @@ type UvProject {
       null
     } else {
       { auditExec(ws).sync; null } rescue {
-        err: Error => err.message
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
       }
     }
   }
@@ -273,10 +286,18 @@ type UvProject {
   }
 
   let lockExec(ws: Workspace!): Container! {
-    tool.lib.at(path).container(ws).withExec(["uv", "lock"])
+    let project = tool.lib.at(path)
+    project.step(project.container(ws), ["uv", "lock"], "uv lock")
   }
 
+  # Auditing reads the lockfile alone, so it mounts only what `uv sync` reads
+  # and a source edit leaves it cached.
   let auditExec(ws: Workspace!): Container! {
-    tool.lib.at(path).container(ws).withExec(["uv", "audit"])
+    let project = tool.lib.at(path)
+    project.step(
+      tool.lib.base.withWorkdir("/ws").withDirectory(".", project.installInputs(ws)).withWorkdir(path),
+      ["uv", "audit"] + project.syncFlags(ws) + tool.auditArgs,
+      "uv audit",
+    )
   }
 }

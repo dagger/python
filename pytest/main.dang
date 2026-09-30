@@ -322,7 +322,7 @@ type PytestProject {
   test(ws: Workspace!): Void {
     let failure = testFailure(ws)
     if (failure != null) {
-      raise "pytest failed in " + path + ": " + failure
+      raise path + ": " + failure
     }
     null
   }
@@ -336,7 +336,7 @@ type PytestProject {
       null
     } else {
       { testExec(ws, []).sync; null } rescue {
-        err: Error => err.message
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
       }
     }
   }
@@ -347,7 +347,10 @@ type PytestProject {
   """
   let runFiles(ws: Workspace!, files: [String!]!): Void {
     testExec(ws, files).sync rescue {
-      err: Error => raise "pytest failed in " + path + ": " + err.message
+      err: Error => raise path + ": " + err.message.replace(
+        old: "evaluating receiver: ",
+        new: "",
+      )
     }
     null
   }
@@ -358,23 +361,20 @@ type PytestProject {
   """
   let testExec(ws: Workspace!, files: [String!]!): Container! {
     let project = tool.lib.at(path)
-    let packages = ["pytest==" + version(ws)]
 
-    # pytest_otel is not on PyPI, so it is mounted and named by path. uv still
-    # resolves it in the same pass as pytest and the project's dependencies,
-    # which is the part that matters.
+    # pytest_otel is not on PyPI, so it is mounted and named by path, and uv
+    # resolves it with pytest against the project's dependencies while the
+    # environment is built, before any source is mounted.
     let plugin = if (tool.tracing) { ["/opt/pytest_otel"] } else { [] }
+    let packages = ["pytest==" + version(ws)] + plugin
     let ignoreNested = project.nestedProjects(ws).map { nested => "--ignore=" + nested }
 
-    project
-      .env(ws, with: packages)
-      .withDirectory("/opt/pytest_otel", tool.pytestOtel)
-      .withExec(
-        ["uv", "run"] + project.withFlags(packages + plugin) + ["pytest"] + tool.args
-          + ignoreNested
-          + files,
-        experimentalPrivilegedNesting: tool.nesting,
-      )
+    project.step(
+      project.env(ws, with: packages, mount: tool.pytestOtel, mountPath: "/opt/pytest_otel"),
+      project.uvRun(packages) + ["pytest"] + tool.args + ignoreNested + files,
+      "pytest",
+      nesting: tool.nesting,
+    )
   }
 }
 

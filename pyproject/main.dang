@@ -70,6 +70,7 @@ type Pyproject {
       "**/.mypy_cache/**",
       "**/.ruff_cache/**",
       "**/*.egg-info/**",
+      "**/.git/**",
     ],
 
     """
@@ -114,15 +115,21 @@ type Pyproject {
   }
 
   """
-  A python:<version>-slim base with the pinned uv on PATH.
+  A python:<version>-slim base with git and the pinned uv on PATH.
 
   Debian rather than Alpine: Python wheels are manylinux, so a musl base forces
-  source builds across most of the ecosystem.
+  source builds across most of the ecosystem. git is there because uv needs it
+  for a dependency sourced from a git repository, and the slim image has none.
   """
   let defaultBase(pythonVersion: String!): Container! {
     container
       .from("python:" + pythonVersion + "-slim")
       .withoutEntrypoint
+      .withExec([
+        "sh",
+        "-c",
+        "apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*",
+      ])
       .withEnvVariable("UV_CACHE_DIR", "/root/.cache/uv")
       .withMountedCache("/root/.cache/uv", cacheVolume("uv-cache"))
       # The cache volume and the workdir are different filesystems, so uv's
@@ -150,12 +157,50 @@ type Pyproject {
   container.
   """
   roots(ws: Workspace!): [String!]! {
-    sorted(
+    let found = sorted(
       ws
         .findRoots(markers: markers, exclude: exclude)
         .map { root => workspaceRootPath(ws, root) }
         .uniq,
     )
+    # Standing in a uv workspace member or path source means standing in the
+    # project that owns it: that project is the one to check.
+    let cwd = normalize(ws.cwd)
+    let top = found.filter { root => within(cwd, root) }.takeFirst(1).join("")
+    let owner = if (top == "" or top == ".") { "" } else {
+      let above = enclosingRoot(ws, parentPath(top))
+      if (above != "" and at(above).absorbed(ws).contains(top)) { above } else { "" }
+    }
+    let lifted = if (owner == "") { found } else {
+      sorted([owner] + found.filter { root => root != top })
+    }
+    let taken = absorbedAmong(ws, lifted, searchBase(ws, lifted))
+    lifted.reject { root => taken.contains(root) }
+  }
+
+  """
+  The roots, among `candidates`, that a project under `base` absorbs as a uv
+  workspace member or path source (see PythonProject.absorbed). One search
+  finds the few pyproject.toml files that declare either.
+  """
+  let absorbedAmong(ws: Workspace!, candidates: [String!]!, base: String!): [String!]! {
+    let empty: [String!]! = []
+    at(base)
+      .searchFiles(ws, ["pyproject.toml"], pattern: `^\[tool\.uv\.(sources|workspace)`)
+      .map { file => parentPath(file) }
+      .uniq
+      .reduce(empty) { taken, dir => taken + at(dir).absorbed(ws) }
+      .filter { root => candidates.contains(root) }
+  }
+
+  """
+  The root of the project holding a workspace-root-relative directory, or ""
+  when none does.
+  """
+  let enclosingRoot(ws: Workspace!, dir: String!): String! {
+    findRootUp(ws, dir) rescue {
+      err: Error => ""
+    }
   }
 
   """
@@ -223,7 +268,9 @@ type Pyproject {
     if (base == normalize(ws.cwd)) {
       candidates
     } else {
-      candidates + at(base).rootsBelow(ws)
+      let below = at(base).rootsBelow(ws)
+      let taken = absorbedAmong(ws, below, base)
+      candidates + below.reject { root => taken.contains(root) }
     }
   }
 
@@ -493,9 +540,135 @@ type PythonProject {
   dependencies -- but keeps them out of its own commands.
   """
   nestedProjects(ws: Workspace!): [String!]! {
+    let taken = absorbed(ws)
     rootsBelow(ws)
       .filter { root => root != path }
+      .reject { root => taken.contains(root) }
       .map { root => if (path == ".") { root } else { root.trimPrefix(path + "/") } }
+  }
+
+  """
+  Workspace-root-relative roots of the projects below this one that its
+  pyproject.toml makes part of it: uv workspace members (`[tool.uv.workspace]
+  members`, less `exclude`) and path sources (`path = ...` in
+  `[tool.uv.sources]`). They are installed into this project's environment and
+  checked with it, not as projects of their own.
+  """
+  absorbed(ws: Workspace!): [String!]! {
+    let empty: [String!]! = []
+    let text = fileContents(ws, "pyproject.toml")
+    if (text.contains("[tool.uv.") == false) {
+      empty
+    } else {
+      let sources = sectionText(text, "tool.uv.sources")
+        .matchAll(`path\s*=\s*"([^"]+)"`)
+        .map { found => joinPath(path, found.captures[0] ?? "") }
+      let workspace = sectionText(text, "tool.uv.workspace")
+      let members = arrayPatterns(workspace, "members")
+      let excluded = arrayPatterns(workspace, "exclude")
+      rootsBelow(ws)
+        .filter { root => root != path }
+        .filter { root =>
+          let rel = relativeTo(root, path)
+          sources.contains(root)
+            or (
+              members.any { glob => globMatches(glob, rel) }
+                and excluded.any { glob => globMatches(glob, rel) } == false
+            )
+        }
+    }
+  }
+
+  # The bodies of every `[section]` and `[section.*]` table, joined.
+  let sectionText(text: String!, section: String!): String! {
+    ("\n" + text)
+      .split("\n[")
+      .dropFirst(1)
+      .filter { chunk =>
+        let header = chunk.split("]").takeFirst(1).join("").trimSpace
+        header == section or header.hasPrefix(section + ".")
+      }
+      .map { chunk => chunk.split("\n").dropFirst(1).join("\n") }
+      .join("\n")
+  }
+
+  # The quoted strings of a TOML array `key = [...]`, which may span lines.
+  let arrayPatterns(text: String!, key: String!): [String!]! {
+    let empty: [String!]! = []
+    ("\n" + text)
+      .split("\n")
+      .map { line => line.trimSpace }
+      .join("\n")
+      .split("\n" + key)
+      .dropFirst(1)
+      .map { rest => rest.trimSpace }
+      .filter { rest => rest.hasPrefix("=") }
+      .map { rest => rest.trimPrefix("=").trimSpace }
+      .filter { rest => rest.hasPrefix("[") }
+      .reduce(empty) { found, rest =>
+        found + rest
+          .trimPrefix("[")
+          .split("]")
+          .takeFirst(1)
+          .join("")
+          .matchAll(`"([^"]+)"`)
+          .map { item => item.captures[0] ?? "" }
+      }
+  }
+
+  # Whether a project-relative path matches a uv workspace glob: "*" within one
+  # path segment, "**" across segments.
+  let globMatches(glob: String!, rel: String!): Boolean! {
+    segmentsMatch(glob.trimPrefix("./").trimSuffix("/").split("/"), rel.split("/"))
+  }
+
+  let segmentsMatch(globs: [String!]!, parts: [String!]!): Boolean! {
+    let head = globs.takeFirst(1).join("")
+    if (globs.isEmpty) {
+      parts.isEmpty
+    } else if (head == "**") {
+      segmentsMatch(globs.dropFirst(1), parts)
+        or (parts.isEmpty == false and segmentsMatch(globs, parts.dropFirst(1)))
+    } else if (parts.isEmpty) {
+      false
+    } else {
+      segmentMatches(head, parts.takeFirst(1).join(""))
+        and segmentsMatch(globs.dropFirst(1), parts.dropFirst(1))
+    }
+  }
+
+  # One path segment against a glob segment whose "*"s match any run of
+  # characters.
+  let segmentMatches(glob: String!, segment: String!): Boolean! {
+    let pieces = glob.split("*")
+    if (pieces.length == 1) {
+      glob == segment
+    } else {
+      let first = pieces.takeFirst(1).join("")
+      let last = pieces.takeLast(1).join("")
+      segment.hasPrefix(first)
+        and segment.trimPrefix(first).hasSuffix(last)
+        and pieces
+          .dropFirst(1)
+          .dropLast(1)
+          .all { piece => segment.trimPrefix(first).trimSuffix(last).contains(piece) }
+    }
+  }
+
+  # A workspace-root-relative path for `relative`, read from directory `dir`.
+  let joinPath(dir: String!, relative: String!): String! {
+    let empty: [String!]! = []
+    let start = if (dir == ".") { empty } else { dir.split("/") }
+    let segments = relative.split("/").reduce(start) { acc, segment =>
+      if (segment == "" or segment == ".") {
+        acc
+      } else if (segment == "..") {
+        acc.dropLast(1)
+      } else {
+        acc + [segment]
+      }
+    }
+    if (segments.isEmpty) { "." } else { segments.join("/") }
   }
 
   """
@@ -621,10 +794,23 @@ type PythonProject {
   }
 
   """
-  Workspace source mounted for this project's commands.
+  Workspace source mounted for this project's commands. `.git` is left out,
+  except for a project whose version comes from version control, which cannot
+  be built without it.
   """
   source(ws: Workspace!): Directory! {
-    ws.directory("/", include: include, exclude: exclude)
+    let tree = ws.directory("/", include: include, exclude: exclude)
+    if (versionFromVcs(ws)) { tree.withDirectory(".git", ws.directory("/.git")) } else { tree }
+  }
+
+  """
+  Whether this project's version comes from version control: setuptools-scm,
+  hatch-vcs, versioningit, a dynamic-versioning plugin, or PDM's scm source.
+  """
+  versionFromVcs(ws: Workspace!): Boolean! {
+    fileContents(ws, "pyproject.toml")
+      .matchAll(`(?i)(setuptools[-_]scm|hatch[-_]vcs|versioningit|dynamic[-_]versioning|dunamai|source\s*=\s*"scm")`)
+      .isEmpty == false
   }
 
   """
@@ -641,27 +827,126 @@ type PythonProject {
   }
 
   """
-  Container with this project's dependencies installed.
+  The files `uv sync` reads to resolve this project's dependencies, and no
+  others: every pyproject.toml in its tree, uv workspace members' included,
+  its uv.lock, .python-version and uv.toml, and the extra include files.
+
+  A source edit changes none of them, so the dependency layer stays cached.
+  """
+  installInputs(ws: Workspace!): Directory! {
+    ws.directory(
+      "/",
+      include: [
+        subpath("**/pyproject.toml"),
+        subpath("uv.lock"),
+        subpath(".python-version"),
+        subpath("uv.toml"),
+      ] + includeExtraFiles,
+      exclude: exclude,
+    )
+  }
+
+  """
+  Flags that keep uv from re-resolving: `--locked` when this project has a
+  uv.lock, so a stale lockfile fails instead of being silently replaced.
+  """
+  syncFlags(ws: Workspace!): [String!]! {
+    if (hasFile(ws, "uv.lock")) { ["--locked"] } else { [] }
+  }
+
+  """
+  Container with this project's dependencies installed, but not the project
+  itself or its local path dependencies, from `installInputs` alone.
+
+  `with` names extra packages the caller needs on top of the project's own.
+  They are resolved against the project's environment here, not installed
+  over the top of a finished one, so a conflict fails here, while building the
+  environment. `mount` is placed at `mountPath` first, for an extra package
+  named by path.
+  """
+  dependencies(
+    ws: Workspace!,
+    with: [String!]! = [],
+    mount: Directory = null,
+    mountPath: String! = "/opt/extra",
+  ): Container! {
+    let inputs = baseImage
+      .withWorkdir("/ws")
+      .withDirectory(".", installInputs(ws))
+      .withWorkdir(path)
+    let mounted = if (mount == null) { inputs } else {
+      inputs.withDirectory(mountPath, mount)
+    }
+    let synced = step(
+      mounted,
+      ["uv", "sync"] + syncFlags(ws) + ["--no-install-workspace", "--no-install-local"],
+      "environment",
+    )
+    if (with.isEmpty) {
+      synced
+    } else {
+      step(synced, uvRun(with) + ["python", "-c", ""], "environment")
+    }
+  }
+
+  """
+  Container with this project's dependencies and the project installed.
 
   This is the one environment the tools that need a Python runtime share. Ask
-  for it with no extra packages and pytest, mypy and ty all get the same
+  for it with the same extra packages and pytest, mypy and ty all get the same
   container, so a single `uv sync` serves three checks instead of three.
 
   mypy and ty need it because a checker that cannot see the installed packages
   cannot resolve third-party imports, and reports errors that are not real.
 
-  `with` names extra packages the caller needs on top of the project's own.
-  They are resolved against the project's dependencies in the same pass, not
-  installed over the top of a finished environment: installing afterwards
-  resolves nothing, so a conflict passes unnoticed. A conflict now fails here,
-  while building the environment.
+  Dependencies are installed before any source is mounted (see
+  `dependencies`), so editing the source reinstalls only the project itself.
   """
-  env(ws: Workspace!, with: [String!]! = []): Container! {
-    let synced = container(ws).withExec(["uv", "sync"])
-    if (with.isEmpty) {
-      synced
+  env(
+    ws: Workspace!,
+    with: [String!]! = [],
+    mount: Directory = null,
+    mountPath: String! = "/opt/extra",
+  ): Container! {
+    let sourced = dependencies(ws, with: with, mount: mount, mountPath: mountPath)
+      .withWorkdir("/ws")
+      .withDirectory(".", source(ws))
+      .withWorkdir(path)
+    step(sourced, ["uv", "sync"] + syncFlags(ws), "environment")
+  }
+
+  """
+  The start of a `uv run` command for a tool in `env`: no re-sync, and the
+  extra packages `env` already resolved.
+  """
+  uvRun(packages: [String!]!): [String!]! {
+    ["uv", "run", "--no-sync"] + withFlags(packages)
+  }
+
+  """
+  Run one step, and when it fails, raise an error naming the step, its
+  command, its exit code and the end of its output, rather than only "exit
+  code: 1". `what` names the step, e.g. "environment" or "mypy".
+  """
+  step(
+    ctr: Container!,
+    args: [String!]!,
+    what: String!,
+    nesting: Boolean! = false,
+  ): Container! {
+    let done = ctr.withExec(args, expect: ReturnType.ANY, experimentalPrivilegedNesting: nesting)
+    let code = done.exitCode
+    if (code == 0) {
+      done
     } else {
-      synced.withExec(["uv", "run"] + withFlags(with) + ["python", "-c", ""])
+      let tail = (done.stdout + "\n" + done.stderr)
+        .split("\n")
+        .reject { line => line.trimSpace == "" }
+        .takeLast(12)
+        .map { line => "    " + line }
+        .join("\n")
+      let detail = if (tail == "") { "" } else { ":\n" + tail }
+      raise what + " failed (" + args.join(" ") + ", exit code " + toString(code) + ")" + detail
     }
   }
 
@@ -684,7 +969,8 @@ type PythonProject {
   which escaping the pattern needs.
   """
   excludeNestedFlags(ws: Workspace!, flag: String!, regex: Boolean!): [String!]! {
-    nestedProjects(ws).reduce([]) { flags, dir =>
+    let empty: [String!]! = []
+    nestedProjects(ws).reduce(empty) { flags, dir =>
       flags + [flag, if (regex) { "^" + Regexp.escape(dir) + "/" } else { quoteGlob(dir) + "/" }]
     }
   }
@@ -713,6 +999,13 @@ type PythonProject {
   """
   toolVersion(ws: Workspace!, tool: String!): String {
     lockedVersion(ws, tool) ?? requiredVersion(ws, tool)
+  }
+
+  # An exact version from a required-version value: "1.2.3" or "==1.2.3". A
+  # range such as ">=1.2" pins nothing, so the caller's default applies.
+  let exactVersion(value: String!): String {
+    let found = value.trimSpace.matchAll(`^(==)?\s*v?([0-9]+(\.[0-9]+)*)$`)
+    if (found.isEmpty) { null } else { found[0].captures[1] }
   }
 
   """
@@ -768,7 +1061,26 @@ type PythonProject {
           .matchAll(`^required-version\s*=\s*"([^"]*)"`)
           .map { found => found.captures[0] }
       }
-      if (values.isEmpty) { null } else { values[0] }
+      if (values.isEmpty) { null } else { exactVersion(values[0] ?? "") }
+    }
+  }
+
+  """
+  Whether the project-relative config file sets `key` in `[section]`, for TOML
+  and INI files alike. Only the presence of the key is read, not its value.
+  """
+  setsKey(ws: Workspace!, relativePath: String!, section: String!, key: String!): Boolean! {
+    let contents = fileContents(ws, relativePath)
+    if (contents == "") {
+      false
+    } else {
+      contents
+        .split("\n")
+        .map { line => line.trimSpace }
+        .dropWhile { line => line != "[" + section + "]" }
+        .dropFirst(1)
+        .takeWhile { line => line.hasPrefix("[") == false }
+        .any { line => line.hasPrefix(key) and line.trimPrefix(key).trimSpace.hasPrefix("=") }
     }
   }
 
@@ -776,7 +1088,7 @@ type PythonProject {
   The contents of a project-relative file, or "" when the project has no such
   file. Absence is ordinary here, so it is not an error.
   """
-  let fileContents(ws: Workspace!, relativePath: String!): String! {
+  fileContents(ws: Workspace!, relativePath: String!): String! {
     if (hasFile(ws, relativePath)) {
       ws.file("/" + subpath(relativePath)).contents
     } else {

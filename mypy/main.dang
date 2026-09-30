@@ -40,6 +40,11 @@ type Mypy {
   """
   defaultVersion: String! = "2.3.1"
 
+  """
+  Extra arguments forwarded to every mypy invocation, e.g. ["--strict"].
+  """
+  args: [String!]! = []
+
   let pythonVersion: String
   let base: Container
 
@@ -63,11 +68,16 @@ type Mypy {
     mypy version used for a project that pins none of its own.
     """
     defaultVersion: String! = "2.3.1",
+    """
+    Extra arguments forwarded to every mypy invocation.
+    """
+    args: [String!]! = [],
   ) {
     self.pythonVersion = version
     self.base = base
     self.scope = scope
     self.defaultVersion = defaultVersion
+    self.args = args
     self
   }
 
@@ -187,7 +197,7 @@ type MypyProject {
   typeCheck(ws: Workspace!): Void @check {
     let failure = typeCheckFailure(ws)
     if (failure != null) {
-      raise "mypy type check failed in " + path + ": " + failure
+      raise path + ": " + failure
     }
     null
   }
@@ -201,7 +211,7 @@ type MypyProject {
       null
     } else {
       { typeCheckExec(ws).sync; null } rescue {
-        err: Error => err.message
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
       }
     }
   }
@@ -209,11 +219,34 @@ type MypyProject {
   let typeCheckExec(ws: Workspace!): Container! {
     let project = tool.lib.at(path)
     let packages = ["mypy==" + version(ws)]
+    # A project whose config names its files is checked as configured: a path
+    # on the command line would override `files` and check everything else.
+    let targets = if (configuresFiles(ws)) { [] } else { ["."] }
     # The environment comes from the library, so the `uv sync` layer underneath
     # is the same one pytest and the other checker get.
-    project
-      .env(ws, with: packages)
-      .withExec(["uv", "run"] + project.withFlags(packages) + ["mypy", "."]
-        + project.excludeNestedFlags(ws, "--exclude", regex: true))
+    project.step(
+      project.env(ws, with: packages),
+      project.uvRun(packages) + ["mypy"] + tool.args + targets
+        + project.excludeNestedFlags(ws, "--exclude", regex: true),
+      "mypy",
+    )
+  }
+
+  """
+  Whether this project's mypy config names the files to check with `files`.
+  mypy reads the first of mypy.ini, .mypy.ini, pyproject.toml ([tool.mypy])
+  and setup.cfg ([mypy]) that configures it, and so does this.
+  """
+  configuresFiles(ws: Workspace!): Boolean! {
+    let project = tool.lib.at(path)
+    if (project.hasFile(ws, "mypy.ini")) {
+      project.setsKey(ws, "mypy.ini", "mypy", "files")
+    } else if (project.hasFile(ws, ".mypy.ini")) {
+      project.setsKey(ws, ".mypy.ini", "mypy", "files")
+    } else if (project.fileContents(ws, "pyproject.toml").contains("[tool.mypy]")) {
+      project.setsKey(ws, "pyproject.toml", "tool.mypy", "files")
+    } else {
+      project.setsKey(ws, "setup.cfg", "mypy", "files")
+    }
   }
 }
