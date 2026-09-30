@@ -477,6 +477,9 @@ type E2e {
   let excludedFixture: String! = "testdata/project-excluded"
   let buildFixture: String! = "testdata/project-build"
   let lockDriftFixture: String! = "testdata/project-lock-drift"
+  let mypyFilesFixture: String! = "testdata/project-mypy-files"
+  let ruffLockedFixture: String! = "testdata/project-ruff-locked"
+  let uvWorkspaceFixture: String! = "testdata/project-uv-workspace"
 
   """
   Fixtures that are broken on purpose, left out so the batch checks
@@ -492,6 +495,8 @@ type E2e {
     "!" + nestedChildFixture,
     "!" + metacharFixture,
     "!" + excludedFixture,
+    # A path source in it holds a type error, checked with the project.
+    "!" + uvWorkspaceFixture,
   ]
 
   let mypyFailure(ws: Workspace!, path: String!): String! {
@@ -754,6 +759,14 @@ type E2e {
   """
   uvAuditCheck(ws: Workspace!): Void @check {
     run(uv.project(ws, regenerateFixture).audit(ws))
+    run(uv(auditArgs: ["--no-dev"]).project(ws, ruffLockedFixture).audit(ws))
+    let args = failureOf(
+      uv(auditArgs: ["--no-such-flag"]).project(ws, regenerateFixture).audit(ws),
+    )
+    assert(
+      args.contains("uv audit failed (uv audit --locked --no-such-flag"),
+      "uv audit did not take its args, or did not name the step: " + args,
+    )
     run(uv(audit: ["**", "!" + lockDriftFixture]).projects(ws).batch.audit(ws))
     null
   }
@@ -842,6 +855,162 @@ type E2e {
       .withExec(["uv", "run"] + project.withFlags(["packaging"])
         + ["python", "-c", "import packaging"])
       .sync
+
+    # Dependencies install from the files uv reads, before any source is
+    # mounted, so a source edit leaves that layer cached.
+    let edited = ws.withNewFile(passFixture + "/greeting.py", "GREETING = 'edited'\n")
+    let editedProject = lib.project(edited, passFixture)
+    assert(
+      project.installInputs(ws).glob("**") == editedProject.installInputs(edited).glob("**"),
+      "a source edit changed the dependency layer's inputs",
+    )
+    assert(
+      project.source(ws).digest != editedProject.source(edited).digest,
+      "a source edit did not reach the project source",
+    )
+    assert(
+      project.installInputs(ws).glob("**/*.py").isEmpty,
+      "the dependency layer mounted source files",
+    )
+
+    # .git never rides along with a project's source.
+    assert(lib.at(".").source(ws).glob(".git/*").isEmpty, "the project source mounted .git")
+
+    # A stale lockfile fails the environment by name instead of being
+    # re-resolved behind the check's back.
+    let stale = { lib.project(ws, lockDriftFixture).env(ws).id; "built" } rescue {
+      err: Error => err.message
+    }
+    assert(
+      stale.contains("environment failed (uv sync --locked"),
+      "a stale uv.lock did not fail the environment by name: " + stale,
+    )
+
+    # uv needs git for a dependency sourced from a git repository.
+    assert(
+      lib.base.withExec(["git", "--version"]).stdout.contains("git version"),
+      "the default base has no git",
+    )
+    null
+  }
+
+  """
+  mypy checks what the project's config names with `files`, rather than every
+  file below the project root, and both checkers take extra arguments.
+  """
+  typeCheckConfigCheck(ws: Workspace!): Void @check {
+    let configured = mypy.project(ws, mypyFilesFixture)
+    assert(configured.configuresFiles(ws), "mypy did not see the configured files")
+    assert(
+      mypy.project(ws, passFixture).configuresFiles(ws) == false,
+      "mypy saw configured files in a project that sets none",
+    )
+    # scripts/ holds a type error outside the configured files.
+    run(configured.typeCheck(ws))
+
+    let strict = failureOf(
+      mypy(args: ["--strict"]).project(ws, mypyFilesFixture).typeCheck(ws),
+    )
+    assert(
+      strict.contains("--strict") and strict.contains("missing a type annotation"),
+      "mypy did not pass its args through: " + strict,
+    )
+    let named = failureOf(mypy.project(ws, typeFailFixture).typeCheck(ws))
+    assert(
+      named.contains(typeFailFixture + ": mypy failed (") and named.contains("mistyped.py"),
+      "a mypy failure did not name the project, the step and the error: " + named,
+    )
+
+    let tyArgs = failureOf(
+      ty(args: ["--definitely-not-a-flag"]).project(ws, passFixture).typeCheck(ws),
+    )
+    assert(tyArgs.contains("--definitely-not-a-flag"), "ty did not pass its args through: " + tyArgs)
+    null
+  }
+
+  """
+  ruff runs the release a project pins, in uv.lock or with an exact
+  required-version, and the bundled one otherwise; a custom container keeps
+  its cache out of the project.
+  """
+  ruffVersionCheck(ws: Workspace!): Void @check {
+    let locked = ruff.project(ws, ruffLockedFixture)
+    assert(locked.pinnedVersion(ws) == "0.15.22", "ruff did not read its version from uv.lock")
+    assert(locked.version(ws).contains("0.15.22"), "the pinned ruff did not run: " + locked.version(ws))
+    run(locked.lint(ws))
+
+    let unpinned = ruff.project(ws, passFixture)
+    assert(unpinned.pinnedVersion(ws) == null, "a project pinning nothing reported a ruff version")
+    assert(
+      unpinned.version(ws) == ruff.version.trimSpace,
+      "an unpinned project did not run the bundled ruff: " + unpinned.version(ws),
+    )
+
+    # The pinned release accepts its own required-version and lints for real.
+    let pinned = ruff.project(ws, ruffTomlFixture)
+    assert(pinned.version(ws).contains("0.6.9"), "ruff.toml's required-version did not run")
+    let violation = failureOf(pinned.lint(ws))
+    assert(
+      violation.contains("F401") and violation.contains("exit code 1"),
+      "the pinned ruff did not report the lint violation: " + violation,
+    )
+
+    let custom = container
+      .from("alpine:3.24.1")
+      .withFile("/usr/local/bin/ruff", container.from("ghcr.io/astral-sh/ruff:0.16.5").file("/ruff"))
+    let changes = ruff(container: custom).project(ws, unformattedFixture).format(ws)
+    assert(
+      changes.addedPaths.isEmpty
+        and sameFiles(
+          changes.modifiedPaths,
+          [unformattedFixture + "/sub/narrow.py", unformattedFixture + "/wide.py"],
+        ),
+      "a custom container's format changed more than the unformatted files: "
+        + changedPaths(changes),
+    )
+    null
+  }
+
+  """
+  A uv workspace member or path source inside a project is part of that
+  project: not a key of its own, not excluded as nested, and checked in the
+  project's environment.
+  """
+  uvWorkspaceCheck(ws: Workspace!): Void @check {
+    let member = uvWorkspaceFixture + "/packages/member-a"
+    let plugin = uvWorkspaceFixture + "/tools/plugin"
+    let project = lib.project(ws, uvWorkspaceFixture)
+    assertKeys("absorbed projects", project.absorbed(ws), [member, plugin])
+    assertKeys(
+      "nested projects of a uv workspace",
+      project.nestedProjects(ws),
+      [],
+    )
+
+    let keys = mypy.projects(ws).keys
+    assert(keys.contains(uvWorkspaceFixture), "the uv workspace root is not a key")
+    assert(
+      keys.contains(member) == false and keys.contains(plugin) == false,
+      "a uv workspace member or path source is a key of its own",
+    )
+    assert(ruff.projects(ws).keys.contains(plugin) == false, "ruff keyed a path source")
+
+    # Standing in a path source selects the project that owns it.
+    let inside = ws.withWorkdir(plugin + "/src")
+    assertKeys("mypy inside a path source", mypy.projects(inside).keys, [uvWorkspaceFixture])
+    assertKeys(
+      "ruff at a path source",
+      ruff.projects(ws.withWorkdir(plugin)).keys,
+      [uvWorkspaceFixture],
+    )
+
+    # Its imports resolve in the owner's environment, and its type error is
+    # the owner's to report.
+    let failure = failureOf(mypy.project(ws, uvWorkspaceFixture).typeCheck(ws))
+    assert(
+      failure.contains("broken.py") and failure.contains("import") == false,
+      "the path source was not checked in its owner's environment: " + failure,
+    )
     null
   }
 
@@ -859,8 +1028,8 @@ type E2e {
   let noTestsFixture2: String! = "testdata/project-no-tests"
 
   """
-  Fixtures ruff must be kept away from: two that are broken on purpose, and the
-  one whose ruff.toml pins a required-version this module's binary is not.
+  Fixtures ruff must be kept away from: they fail lint on purpose, one of them
+  under the ruff release its ruff.toml pins.
   """
   let ruffHealthy: [String!]! = [
     "**",

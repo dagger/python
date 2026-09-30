@@ -21,8 +21,7 @@ github.com/dagger/python
 
 ## Requirements
 
-Every module needs Dagger engine v1.0.0-beta.15 or later, for collections.
-That release is not out yet, so for now run them on a dev engine build.
+Every module requires Dagger v1.0.0-beta.15 or later.
 
 ## Install
 
@@ -48,14 +47,14 @@ library; see "Relationship to the standalone modules" below.
 Each tool module's `projects` is a Dagger collection keyed by project root, so
 it adds a dimension — `ruff-project`, `pytest-project`, `mypy-project`,
 `ty-project`, `uv-project` — that checks and generators select on. pytest adds a
-second one under it, `pytest-test-file`, keyed by test file. A check's name is a
-flag too. For a repository with projects `app` and `libs/core`:
+second one under it, `pytest-test-file`, keyed by test file. For a repository
+with projects `app` and `libs/core`:
 
 ```console
-$ dagger list ruff-projects
-$ dagger list pytest-test-files --pytest-project=app
-$ dagger check --ruff --lint --ruff-project=app
-$ dagger check --type-check                    # mypy and ty together
+$ dagger list -a ruff-projects
+$ dagger list -a pytest-test-files --pytest-project=app
+$ dagger check --ruff --check lint --ruff-project=app
+$ dagger check --check type-check              # mypy and ty together
 $ dagger check --pytest --pytest-project=app --pytest-test-file=tests/test_api.py
 $ dagger generate --ruff --ruff-project=app     # ruff format
 $ dagger check -l --all --ruff -f=cli           # one line per project, as flags
@@ -63,10 +62,22 @@ $ dagger check -l --all --ruff -f=cli           # one line per project, as flags
 
 `dagger check --help` lists the flags in effect: `--ruff-project`,
 `--pytest-project`, `--pytest-test-file`, `--mypy-project`, `--ty-project` and
-`--uv-project` select keys; `--ruff`, `--pytest`, `--mypy`, `--ty` and `--uv`
-select a module; and `--lint`, `--test`, `--type-check` and `--audit` select a
-check by name across modules, as `--stale` selects the generators' staleness
-checks.
+`--uv-project` select keys (`--ruff-projects`, `--pytest-tests` and so on select
+a whole dimension); `--ruff`, `--pytest`, `--mypy`, `--ty` and `--uv` select a
+module; and `--check <name>` selects a check by name across modules: `lint`,
+`test`, `type-check`, `audit`, or `stale` for the generators' staleness checks.
+
+`dagger call` cannot step into a collection yet. To call a function on one
+project, use the shell form:
+
+```console
+$ dagger -c 'ruff | projects | get app | version'
+```
+
+Run checks with `dagger check`, in CI above all: calling a check function
+(`lint`, `test`, `type-check`, `audit`) with `dagger call` or `dagger -c` does
+not fail the command when the check fails. Other functions — `format`, `fix`,
+`lock`, `build`, `version` — are fine to call.
 
 ### Where you stand selects the project
 
@@ -98,8 +109,10 @@ container or a Python tool. It reads the workspace directly:
 | `pytest` | holds a test file of its own (see below)                   | one `findRoots`, one ripgrep search |
 | `uv`     | holds a `uv.lock`                                         | two `findRoots` |
 
-Each search and walk prunes the library's `exclude` list — `.venv`,
-`site-packages`, `node_modules`, `__pycache__` and the tool caches — so a
+One more ripgrep search finds the few `pyproject.toml` files that declare uv
+workspace members or path sources (see below). Each search and walk prunes the
+library's `exclude` list — `.venv`,
+`site-packages`, `node_modules`, `__pycache__`, `.git` and the tool caches — so a
 virtualenv with thousands of files costs nothing. A file belongs to the deepest
 project holding it, so a nested project's files are never its parent's. From
 inside a project, one more `findRoots` finds that project's nested projects.
@@ -114,8 +127,49 @@ whole-project run still collects those, because it runs pytest the way the
 project configures it.
 
 On a tree with 40 projects and 16,000 files in their virtualenvs, discovery
-for `dagger check -l --all` with all five modules installed takes 4–8 seconds
-on a dev engine, down from 12–25 seconds when each project walked its own tree.
+for `dagger check -l --all` with all five modules installed takes 4–8 seconds,
+down from 12–25 seconds when each project walked its own tree.
+
+A uv workspace member, or a `path` source in `[tool.uv.sources]`, that sits
+inside the project declaring it is part of that project: it is not a key of
+its own, and it is not excluded from the project's runs as a nested project.
+It is installed into the project's environment and checked there, where its
+imports resolve. Standing inside one selects the project that owns it. A path
+source outside the declaring project stays a project of its own.
+
+### The Python environment
+
+mypy, ty and pytest run in the project's own environment, built with uv in two
+steps:
+
+1. `uv sync --locked --no-install-workspace --no-install-local`, with only the
+   files uv reads mounted: every `pyproject.toml` in the project, its
+   `uv.lock`, `.python-version` and `uv.toml`. The tool itself (`mypy==…`,
+   `pytest==…` and the bundled `pytest_otel` plugin) is resolved against those
+   dependencies in the same step.
+2. The source is mounted and `uv sync --locked` installs the project and its
+   local path dependencies.
+
+A source edit leaves the first step cached, so only the project itself is
+reinstalled. `--locked` is dropped for a project with no `uv.lock`; with one, a
+stale lockfile fails the environment rather than being re-resolved behind the
+check's back — `dagger generate --uv` refreshes it. `.git` is not mounted,
+except for a project whose version comes from version control
+(setuptools-scm, hatch-vcs and the like), which cannot be built without it.
+The default base image has git, for dependencies sourced from a git
+repository.
+
+A failure names the step: the environment, or the tool, with its command, exit
+code and the end of its output.
+
+```
+mypy type check failed:
+- src/app: environment failed (uv sync --locked --no-install-workspace --no-install-local, exit code 1):
+    error: The lockfile at `uv.lock` needs to be updated, but `--locked` was provided.
+- src/lib: mypy failed (uv run --no-sync --with mypy==2.3.1 mypy ., exit code 1):
+    lib/core.py:3: error: Incompatible return value type (got "str", expected "int")
+    Found 1 error in 1 file (checked 4 source files)
+```
 
 ### Batches
 
@@ -159,7 +213,7 @@ run(pytest.project(ws, "app").tests(ws).subset(keys: ["tests/test_api.py"]).batc
 
 `projects(ws).keys` lists the keys, `get(key:)` builds one item, and
 `subset(keys:)` narrows the batch. `dagger call` cannot step into a collection
-yet; use `dagger check`, `dagger list`, or a module.
+yet; use `dagger check`, `dagger list`, `dagger -c`, or a module.
 
 ## Scoping
 
@@ -170,6 +224,13 @@ Say which project roots you mean in `dagger.toml`:
 ```toml
 [modules.ruff.settings]
 scope = ["**", "!.dagger"]
+```
+
+or from the command line, where `-u` unsets it again:
+
+```console
+$ dagger settings ruff scope '["**", "!.dagger"]'
+$ dagger settings -u ruff scope
 ```
 
 A bare pattern selects, a `"!"`-prefixed pattern excludes, and an exclude wins
@@ -202,19 +263,28 @@ Pass `includeSkipped: false` to `projects` to leave such projects out.
 | ----------- | -------- | -------------------------------------------------------- |
 | `scope`     | `["**"]` | Project roots to lint and format (see [Scoping](#scoping)). |
 | `args`      | `[]`     | Extra arguments for every ruff invocation.               |
-| `container` | none     | Base image with ruff on PATH, instead of the bundled one. |
+| `container` | none     | Base image with ruff on PATH, used as it is for every project. |
 
 On a project: `lint` (a `@check`, `ruff check`), `format` (a `@generate`,
-`ruff format`), `fix` (`ruff check --fix --exit-zero`, returns a changeset) and
-`skip`. The collection's batch `lint`, `format` and `fix` run once over the
+`ruff format`), `fix` (`ruff check --fix --exit-zero`, returns a changeset),
+`version`, `pinned-version` and `skip`. The collection's batch `lint`, `format` and `fix` run once over the
 selected projects.
 
 `format` is a generator, so `dagger generate` applies it and `dagger check`
 fails when a project is not formatted, as ruff's `stale` check. `fix` is not a
 generator and has no staleness check: a fixable violation already fails `lint`.
 
+ruff runs the release the project pins: the `ruff` version in its `uv.lock`,
+else an exact `required-version` in `ruff.toml`, `.ruff.toml` or
+`[tool.ruff]` in `pyproject.toml`. That release's binary comes from its
+official image, `ghcr.io/astral-sh/ruff:<version>`. A project pinning nothing,
+or only a range, gets the bundled release (0.16.5). A project's `version`
+reports the ruff that runs on it; the module's `version` reports the bundled
+one. A custom `container` is used as it is, pins or not. Either way ruff's
+cache lives in a cache volume, never in the project.
+
 ruff never touches uv. It is a standalone binary that reaches the same verdicts
-with no interpreter present, so it runs on a bare Alpine base with the pinned
+with no interpreter present, so it runs on a bare Alpine base with the ruff
 binary on PATH. It uses the library only for the parts every Python tool
 repeats: finding projects, keeping nested ones apart, and deciding what to
 mount.
@@ -266,9 +336,10 @@ A project with no test files is not a key, and its `test` does nothing: bare
 pytest exits 5 on an empty collection, so running it there would fail a project
 whose only fault is having no tests yet.
 
-The bundled `pytest_otel` plugin is resolved alongside pytest and the project's
-own dependencies in one uv pass, rather than installed over the top of a
-finished environment.
+The bundled `pytest_otel` plugin is resolved with pytest against the project's
+dependencies while the environment is built (see [The Python
+environment](#the-python-environment)), rather than installed over the top of a
+finished one.
 
 A suite that drives Dagger itself needs a nested engine, and gets one by
 default, the same way Go tests do in `dagger/go`. This grants the tests access
@@ -290,6 +361,7 @@ nesting = false
 | --------- | -------- | ---------------------------------------------------------- |
 | `lock`    | `["**"]` | Project roots to lock.                                     |
 | `audit`   | `["**"]` | Project roots to audit.                                    |
+| `auditArgs` | `[]`   | Extra arguments for `uv audit`, e.g. `["--no-dev"]`.       |
 | `version` | `3.14`   | Python version of the default base image.                  |
 | `base`    | none     | Base image with Python and uv, instead of the default one. |
 
@@ -298,6 +370,11 @@ On a project: `audit` (a `@check`, `uv audit`), `lock` (a `@generate`,
 `has-lockfile`, `skip-lock` and `skip-audit`. The collection's batch `audit`,
 `lock` and `build` run once over the selected projects; the batch `build`
 places each `dist` under its project root.
+
+`audit` runs `uv audit --locked` over the lockfile. To leave dependency groups
+out, pass uv's own flags: `["--no-dev"]` for the development group,
+`["--no-group", "typing"]` for one group, `["--no-default-groups"]` for all
+default groups.
 
 Locking is a `@generate` rather than a pass/fail check, so drift shows up in
 `dagger check`, as uv's `stale` check, *and* is repaired by `dagger generate`.
@@ -316,12 +393,21 @@ failing it would be wrong.
 | ---------------- | ------------------------- | ------------------------------------------ |
 | `scope`          | `["**"]`                  | Project roots to type check.               |
 | `defaultVersion` | mypy `2.3.1`, ty `0.0.78` | The checker for a project that pins none.  |
+| `args`           | `[]`                      | Extra arguments for every run, e.g. `["--strict"]`. |
 | `version`        | `3.14`                    | Python version of the default base image.  |
 | `base`           | none                      | Base image with Python and uv.             |
 
-On a project: `type-check` (a `@check`), `has-sources`, `version`, `skip`. Both
-modules name the check `type-check`, so `dagger check --type-check` runs them
-together and `--mypy --type-check` runs one.
+On a project: `type-check` (a `@check`), `has-sources`, `version`, `skip`, and
+for mypy `configures-files`. Both modules name the check `type-check`, so
+`dagger check --check type-check` runs them together and `--mypy --check
+type-check` runs one.
+
+mypy runs as the project configures it. When the project's mypy config names
+its files — `files` in `mypy.ini`, `.mypy.ini`, `[tool.mypy]` in
+`pyproject.toml` or `[mypy]` in `setup.cfg`, whichever mypy reads first — it
+runs bare `mypy`, so the config decides what is checked; otherwise it runs
+`mypy .`. ty always runs bare `ty check` and honours `[tool.ty.src]`. Nested
+projects are excluded either way.
 
 Both run inside the project's environment. A checker that cannot see the
 installed packages cannot resolve third-party imports and reports errors that
@@ -354,7 +440,15 @@ On a project:
 | ------------------------ | ----------------------------------------------------------------- |
 | `source`                 | The workspace source mounted for this project's commands.          |
 | `container`              | That source, on the base image, with the project root as workdir.  |
-| `env`                    | That container with the project's dependencies installed.          |
+| `dependencies`           | The base with the project's dependencies installed, from `install-inputs` alone. |
+| `env`                    | `dependencies` with the source mounted and the project installed.  |
+| `install-inputs`         | The files `uv sync` reads: `pyproject.toml`s, `uv.lock`, `.python-version`, `uv.toml`. |
+| `sync-flags`             | `--locked` when the project has a `uv.lock`.                       |
+| `uv-run`                 | The start of a `uv run` command for a tool in `env`.               |
+| `step`                   | Run a command, failing with its name, command, exit code and output. |
+| `absorbed`               | uv workspace members and path sources below this project that belong to it. |
+| `version-from-vcs`       | Whether the project's version comes from version control.          |
+| `sets-key`               | Whether a config file sets a key in a section.                     |
 | `selected`               | Whether selection patterns choose this project.                    |
 | `within-cwd`             | Whether this project is at or below the workspace cwd.             |
 | `nested-projects`        | Project-relative roots of the projects nested inside this one.     |
@@ -406,7 +500,7 @@ them. The rest are plain arguments, so a project that wants a different version
 either pins it in its own metadata or sets `defaultVersion`.
 
 **One environment, not three.** pytest, mypy and ty all ask the library for the
-same container, so one `uv sync` serves three checks.
+same dependency layer, so one `uv sync` serves three checks.
 
 ## Relationship to the standalone modules
 
@@ -430,8 +524,7 @@ Two differences are worth knowing before you switch:
 dagger check -m .dagger/modules/e2e
 ```
 
-The suite needs the same engine as the modules: v1.0.0-beta.15 or later, which
-for now means a dev engine build.
+The suite requires Dagger v1.0.0-beta.15 or later, as the modules do.
 
 `testdata/` holds the fixture projects the suite runs against. Several of them
 fail on purpose — a failing test, a type error, a stale lockfile — and the
