@@ -77,13 +77,40 @@ type Ruff {
   }
 
   """
-  The base every ruff command runs on: Alpine, the pinned binary, and a cache.
+  The base a project that pins no ruff runs on: the custom container, or
+  Alpine with the bundled binary, and a cache either way.
   """
   base: Container! {
-    container ?? alpine
+    withCache(container ?? alpine.withDirectory("/usr/local/bin", ruffBinary, include: ["ruff"]))
+  }
+
+  """
+  The base for a project pinning ruff `version`: Alpine with that release's
+  binary from its official image. A custom container is used as it is, since
+  it brings its own ruff.
+  """
+  let pinnedBase(version: String): Container! {
+    if (container != null or version == null) {
+      base
+    } else {
+      withCache(
+        alpine.withDirectory(
+          "/usr/local/bin",
+          Dagger.container.from("ghcr.io/astral-sh/ruff:" + (version ?? "")).rootfs,
+          include: ["ruff"],
+        ),
+      )
+    }
+  }
+
+  """
+  Keep ruff's cache in a cache volume, outside the project, so it never lands
+  in the project tree or in a changeset.
+  """
+  let withCache(ctr: Container!): Container! {
+    ctr
       .withEnvVariable("RUFF_CACHE_DIR", "/root/.cache/ruff")
       .withMountedCache("/root/.cache/ruff", cacheVolume("ruff-cache"))
-      .withDirectory("/usr/local/bin", ruffBinary, include: ["ruff"])
   }
 
   """
@@ -126,9 +153,11 @@ type Ruff {
       let sub = project.cwdSubpath(ws)
       before.withDirectory(
         project.cwdPath(ws),
-        project.source(ws).directory(if (sub == ".") { root } else {
-          project.subpath(sub)
-        }),
+        project.source(ws).directory(
+          if (sub == ".") { root } else {
+            project.subpath(sub)
+          },
+        ),
       )
     }
     roots
@@ -139,13 +168,15 @@ type Ruff {
           ruffProject(root).ruffExec(ws, command).directory(
             project.cwdSubpath(ws),
           ),
+          exclude: ["**/.ruff_cache"],
         )
       }
       .changes(before)
   }
 
   """
-  The version of the bundled ruff binary.
+  The version of the ruff a project that pins none runs: the bundled binary,
+  or the custom container's. See a project's own `version` for what it runs.
   """
   version: String! {
     base.withExec(["ruff", "--version"]).stdout
@@ -225,12 +256,31 @@ type RuffProject {
   }
 
   """
+  The ruff release this project pins in uv.lock or with an exact
+  required-version, or null when it pins none and the bundled one runs.
+  """
+  pinnedVersion(ws: Workspace!): String {
+    tool.lib.at(path).toolVersion(ws, "ruff")
+  }
+
+  """
+  The version of the ruff that runs on this project.
+  """
+  version(ws: Workspace!): String! {
+    ruffBase(ws).withExec(["ruff", "--version"]).stdout.trimSpace
+  }
+
+  let ruffBase(ws: Workspace!): Container! {
+    tool.pinnedBase(pinnedVersion(ws))
+  }
+
+  """
   Lint this project with ruff.
   """
   lint(ws: Workspace!): Void @check {
     let failure = lintFailure(ws)
     if (failure != null) {
-      raise "ruff lint failed in " + path + ": " + failure
+      raise path + ": " + failure
     }
     null
   }
@@ -243,8 +293,8 @@ type RuffProject {
     if (skip) {
       null
     } else {
-      { lintExec(ws).sync; null } rescue {
-        err: Error => err.message
+      { ruffExec(ws, ["check"]).sync; null } rescue {
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
       }
     }
   }
@@ -279,16 +329,21 @@ type RuffProject {
   }
 
   let workContainer(ws: Workspace!): Container! {
-    tool
-      .base
+    ruffBase(ws)
       .withWorkdir("/ws")
       .withDirectory(".", tool.lib.at(path).source(ws))
       .withWorkdir(path)
   }
 
+  """
+  Container that has run a ruff command in this project, failing with the
+  command, its exit code and the end of its output.
+  """
   let ruffExec(ws: Workspace!, command: [String!]!): Container! {
-    workContainer(ws).withExec(["ruff"] + command + tool.args + excludeNested(ws))
+    tool.lib.at(path).step(
+      workContainer(ws),
+      ["ruff"] + command + tool.args + excludeNested(ws),
+      "ruff " + command.takeFirst(1).join(""),
+    )
   }
-
-  let lintExec(ws: Workspace!): Container! { ruffExec(ws, ["check"]) }
 }
