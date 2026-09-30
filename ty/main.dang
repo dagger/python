@@ -213,7 +213,10 @@ type TyProject {
       null
     } else {
       { typeCheckExec(ws).sync; null } rescue {
-        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
+          old: "reduce function: ",
+          new: "",
+        )
       }
     }
   }

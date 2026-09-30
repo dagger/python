@@ -336,7 +336,10 @@ type PytestProject {
       null
     } else {
       { testExec(ws, []).sync; null } rescue {
-        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
+          old: "reduce function: ",
+          new: "",
+        )
       }
     }
   }
@@ -347,10 +350,10 @@ type PytestProject {
   """
   let runFiles(ws: Workspace!, files: [String!]!): Void {
     testExec(ws, files).sync rescue {
-      err: Error => raise "pytest failed:\n- " + path + ": " + err.message.replace(
-        old: "evaluating receiver: ",
-        new: "",
-      )
+      err: Error => raise "pytest failed:\n- " + path + ": " + err
+        .message
+        .replace(old: "evaluating receiver: ", new: "")
+        .replace(old: "reduce function: ", new: "")
     }
     null
   }

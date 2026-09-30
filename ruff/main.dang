@@ -107,6 +107,18 @@ type Ruff {
   Keep ruff's cache in a cache volume, outside the project, so it never lands
   in the project tree or in a changeset.
   """
+
+  """
+  An error message without the "evaluating receiver:" and "reduce function:"
+  frames Dang adds as an error passes through a chain of calls.
+  """
+  let clean(message: String!): String! {
+    message.replace(old: "evaluating receiver: ", new: "").replace(
+      old: "reduce function: ",
+      new: "",
+    )
+  }
+
   let withCache(ctr: Container!): Container! {
     ctr
       .withEnvVariable("RUFF_CACHE_DIR", "/root/.cache/ruff")
@@ -225,7 +237,9 @@ type RuffProjects @collection {
   """
   format(ws: Workspace!): Changeset! @generate {
     let roots = paths.map { p => project(p) }.filter { p => p.skip == false }.map { p => p.path }
-    tool.changes(ws, roots, ["format"])
+    tool.changes(ws, roots, ["format"]) rescue {
+      err: Error => raise tool.clean(err.message)
+    }
   }
 
   """
@@ -233,7 +247,9 @@ type RuffProjects @collection {
   """
   fix(ws: Workspace!): Changeset! {
     let roots = paths.map { p => project(p) }.filter { p => p.skip == false }.map { p => p.path }
-    tool.changes(ws, roots, ["check", "--fix", "--exit-zero"])
+    tool.changes(ws, roots, ["check", "--fix", "--exit-zero"]) rescue {
+      err: Error => raise tool.clean(err.message)
+    }
   }
 }
 
@@ -268,7 +284,9 @@ type RuffProject {
   The version of the ruff that runs on this project.
   """
   version(ws: Workspace!): String! {
-    ruffBase(ws).withExec(["ruff", "--version"]).stdout.trimSpace
+    ruffBase(ws).withExec(["ruff", "--version"]).stdout.trimSpace rescue {
+      err: Error => raise tool.clean(err.message)
+    }
   }
 
   let ruffBase(ws: Workspace!): Container! {
@@ -284,7 +302,7 @@ type RuffProject {
       } else {
         raise "the project requires ruff " + (range ?? "") + ", which the bundled ruff "
           + bundled + " does not satisfy: set an exact required-version, such as "
-          + "required-version = \"0.6.9\", or lock ruff in uv.lock"
+          + "required-version = \"X.Y.Z\" inside that range, or lock ruff in uv.lock"
       }
     }
   }
@@ -309,7 +327,7 @@ type RuffProject {
       null
     } else {
       { ruffExec(ws, ["check"]).sync; null } rescue {
-        err: Error => err.message.replace(old: "evaluating receiver: ", new: "")
+        err: Error => tool.clean(err.message)
       }
     }
   }
@@ -319,7 +337,9 @@ type RuffProject {
   """
   format(ws: Workspace!): Changeset! @generate {
     if (skip) { directory.changes(directory) } else {
-      tool.changes(ws, [path], ["format"])
+      tool.changes(ws, [path], ["format"]) rescue {
+        err: Error => raise tool.clean(err.message)
+      }
     }
   }
 
@@ -331,7 +351,9 @@ type RuffProject {
   """
   fix(ws: Workspace!): Changeset! {
     if (skip) { directory.changes(directory) } else {
-      tool.changes(ws, [path], ["check", "--fix", "--exit-zero"])
+      tool.changes(ws, [path], ["check", "--fix", "--exit-zero"]) rescue {
+        err: Error => raise tool.clean(err.message)
+      }
     }
   }
 
