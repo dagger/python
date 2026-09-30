@@ -46,6 +46,16 @@ class TestParseNodeid:
         assert cls is None
         assert func == "test_bar[param1-param2]"
 
+    def test_parametrized_id_with_separator(self):
+        """A "::" inside a parameter id does not split the nodeid."""
+        ctx = SpanContextManager()
+        module, cls, func = ctx._parse_nodeid("tests/test_foo.py::test_bar[a::b]")
+
+        assert module == "tests/test_foo.py"
+        assert cls is None
+        assert func == "test_bar[a::b]"
+        assert ctx._test_suite_name("tests/test_foo.py::test_bar[a::b]") == "tests/test_foo.py"
+
     def test_nested_class(self):
         """Test parsing a nested class nodeid."""
         ctx = SpanContextManager()
