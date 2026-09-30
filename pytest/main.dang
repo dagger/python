@@ -322,7 +322,7 @@ type PytestProject {
   test(ws: Workspace!): Void {
     let failure = testFailure(ws)
     if (failure != null) {
-      raise path + ": " + failure
+      raise "pytest failed:\n- " + path + ": " + failure
     }
     null
   }
@@ -347,7 +347,7 @@ type PytestProject {
   """
   let runFiles(ws: Workspace!, files: [String!]!): Void {
     testExec(ws, files).sync rescue {
-      err: Error => raise path + ": " + err.message.replace(
+      err: Error => raise "pytest failed:\n- " + path + ": " + err.message.replace(
         old: "evaluating receiver: ",
         new: "",
       )

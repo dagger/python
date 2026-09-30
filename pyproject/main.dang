@@ -799,7 +799,9 @@ type PythonProject {
   be built without it.
   """
   source(ws: Workspace!): Directory! {
-    let tree = ws.directory("/", include: include, exclude: exclude)
+    # The workspace's own Dagger config is no project's source: a settings
+    # edit must not re-run a project's install.
+    let tree = ws.directory("/", include: include, exclude: exclude + ["dagger.toml", "dagger.lock"])
     if (versionFromVcs(ws)) { tree.withDirectory(".git", ws.directory("/.git")) } else { tree }
   }
 
@@ -828,22 +830,34 @@ type PythonProject {
 
   """
   The files `uv sync` reads to resolve this project's dependencies, and no
-  others: every pyproject.toml in its tree, uv workspace members' included,
-  its uv.lock, .python-version and uv.toml, and the extra include files.
+  others: its pyproject.toml, uv.lock, .python-version and uv.toml, the
+  pyproject.toml of each uv workspace member and path source it absorbs (see
+  `absorbed`), and the extra include files.
 
-  A source edit changes none of them, so the dependency layer stays cached.
+  A source edit changes none of them, nor does an edit to an unrelated
+  project's pyproject.toml, so the dependency layer stays cached.
   """
   installInputs(ws: Workspace!): Directory! {
     ws.directory(
       "/",
       include: [
-        subpath("**/pyproject.toml"),
+        subpath("pyproject.toml"),
         subpath("uv.lock"),
         subpath(".python-version"),
         subpath("uv.toml"),
-      ] + includeExtraFiles,
+      ] + absorbed(ws).map { root => root + "/pyproject.toml" } + includeExtraFiles,
       exclude: exclude,
     )
+  }
+
+  """
+  Whether `uv sync` installs anything local beside the project itself: a uv
+  workspace member or a path source.
+  """
+  hasLocalDependencies(ws: Workspace!): Boolean! {
+    let text = fileContents(ws, "pyproject.toml")
+    text.contains("[tool.uv.workspace]")
+      or sectionText(text, "tool.uv.sources").matchAll(`path\s*=`).isEmpty == false
   }
 
   """
@@ -861,8 +875,8 @@ type PythonProject {
   `with` names extra packages the caller needs on top of the project's own.
   They are resolved against the project's environment here, not installed
   over the top of a finished one, so a conflict fails here, while building the
-  environment. `mount` is placed at `mountPath` first, for an extra package
-  named by path.
+  environment. `mount` is placed at `mountPath` for an extra package named
+  by path, after the dependency sync, so every tool shares that layer.
   """
   dependencies(
     ws: Workspace!,
@@ -874,18 +888,18 @@ type PythonProject {
       .withWorkdir("/ws")
       .withDirectory(".", installInputs(ws))
       .withWorkdir(path)
-    let mounted = if (mount == null) { inputs } else {
-      inputs.withDirectory(mountPath, mount)
-    }
     let synced = step(
-      mounted,
+      inputs,
       ["uv", "sync"] + syncFlags(ws) + ["--no-install-workspace", "--no-install-local"],
       "environment",
     )
+    let mounted = if (mount == null) { synced } else {
+      synced.withDirectory(mountPath, mount)
+    }
     if (with.isEmpty) {
-      synced
+      mounted
     } else {
-      step(synced, uvRun(with) + ["python", "-c", ""], "environment")
+      step(mounted, uvRun(with) + ["python", "-c", ""], "environment")
     }
   }
 
@@ -901,18 +915,31 @@ type PythonProject {
 
   Dependencies are installed before any source is mounted (see
   `dependencies`), so editing the source reinstalls only the project itself.
+
+  With `installProject` false, the project itself is not installed: a type
+  checker reads first-party code from the source, so it needs neither the
+  project's build backend nor a compiler for a native extension, and a
+  source edit rebuilds nothing. Its uv workspace members and path sources are
+  still installed, when it has any, since its imports of them resolve there.
   """
   env(
     ws: Workspace!,
     with: [String!]! = [],
     mount: Directory = null,
     mountPath: String! = "/opt/extra",
+    installProject: Boolean! = true,
   ): Container! {
     let sourced = dependencies(ws, with: with, mount: mount, mountPath: mountPath)
       .withWorkdir("/ws")
       .withDirectory(".", source(ws))
       .withWorkdir(path)
-    step(sourced, ["uv", "sync"] + syncFlags(ws), "environment")
+    if (installProject) {
+      step(sourced, ["uv", "sync"] + syncFlags(ws), "environment")
+    } else if (hasLocalDependencies(ws)) {
+      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--no-install-project"], "environment")
+    } else {
+      sourced
+    }
   }
 
   """
@@ -1001,6 +1028,72 @@ type PythonProject {
     lockedVersion(ws, tool) ?? requiredVersion(ws, tool)
   }
 
+  """
+  Whether a version satisfies a PEP 440 specifier set such as ">=0.5,<0.7".
+  Supports ==, !=, >=, <=, >, <, ~= and a trailing ".*" with == and !=, over
+  release numbers; a pre-release or local suffix is ignored. A bare version
+  means ==.
+  """
+  versionSatisfies(version: String!, spec: String!): Boolean! {
+    spec
+      .split(",")
+      .map { clause => clause.trimSpace }
+      .reject { clause => clause == "" }
+      .all { clause => clauseSatisfied(version, clause) }
+  }
+
+  let clauseSatisfied(version: String!, clause: String!): Boolean! {
+    let ops = ["~=", "==", "!=", ">=", "<=", ">", "<"]
+    let op = ops.filter { candidate => clause.hasPrefix(candidate) }.takeFirst(1).join("")
+    let target = clause.trimPrefix(op).trimSpace.trimPrefix("v")
+    if (op == "==" or op == "") {
+      matchesRelease(version, target)
+    } else if (op == "!=") {
+      matchesRelease(version, target) == false
+    } else if (op == ">=") {
+      releaseKey(version) >= releaseKey(target)
+    } else if (op == "<=") {
+      releaseKey(version) <= releaseKey(target)
+    } else if (op == ">") {
+      releaseKey(version) > releaseKey(target)
+    } else if (op == "<") {
+      releaseKey(version) < releaseKey(target)
+    } else {
+      # ~=X.Y.Z means >=X.Y.Z and ==X.Y.*
+      let prefix = target.split(".").dropLast(1).join(".") + ".*"
+      releaseKey(version) >= releaseKey(target) and matchesRelease(version, prefix)
+    }
+  }
+
+  # == with an optional trailing ".*", which compares only the leading parts.
+  let matchesRelease(version: String!, target: String!): Boolean! {
+    if (target.hasSuffix(".*")) {
+      let parts = target.trimSuffix(".*").split(".")
+      releaseParts(version).takeFirst(parts.length).join(".")
+        == releaseParts(target.trimSuffix(".*")).join(".")
+    } else {
+      releaseKey(version) == releaseKey(target)
+    }
+  }
+
+  # Release numbers without leading zeros or a pre-release/local suffix.
+  let releaseParts(version: String!): [String!]! {
+    version.split("+").takeFirst(1).join("").split(".").map { part =>
+      let digits = part.matchAll(`^[0-9]+`).map { found => found.string }.join("")
+      let trimmed = digits.split("").dropWhile { char => char == "0" }.join("")
+      if (trimmed == "") { "0" } else { trimmed }
+    }
+  }
+
+  # Release numbers padded to a fixed width, so versions compare as strings.
+  let releaseKey(version: String!): String! {
+    let parts = releaseParts(version)
+    (parts + ["0", "0", "0", "0", "0", "0"])
+      .takeFirst(6)
+      .map { part => ("0000000000" + part).split("").takeLast(10).join("") }
+      .join(".")
+  }
+
   # An exact version from a required-version value: "1.2.3" or "==1.2.3". A
   # range such as ">=1.2" pins nothing, so the caller's default applies.
   let exactVersion(value: String!): String {
@@ -1033,6 +1126,15 @@ type PythonProject {
   The version of `tool` this project declares with required-version, if any.
   """
   let requiredVersion(ws: Workspace!, tool: String!): String {
+    exactVersion(requiredSpec(ws, tool) ?? "")
+  }
+
+  """
+  The required-version this project declares for `tool`, exact or a range
+  such as ">=0.5,<0.7", or null when it declares none. Read from
+  `[tool.<tool>]` in pyproject.toml, else <tool>.toml, else .<tool>.toml.
+  """
+  requiredSpec(ws: Workspace!, tool: String!): String {
     declaredIn(ws, "pyproject.toml", "tool." + tool)
       ?? declaredIn(ws, tool + ".toml", "")
         ?? declaredIn(ws, "." + tool + ".toml", "")
@@ -1061,7 +1163,7 @@ type PythonProject {
           .matchAll(`^required-version\s*=\s*"([^"]*)"`)
           .map { found => found.captures[0] }
       }
-      if (values.isEmpty) { null } else { exactVersion(values[0] ?? "") }
+      if (values.isEmpty) { null } else { values[0] }
     }
   }
 

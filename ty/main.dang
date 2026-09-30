@@ -199,7 +199,7 @@ type TyProject {
   typeCheck(ws: Workspace!): Void @check {
     let failure = typeCheckFailure(ws)
     if (failure != null) {
-      raise path + ": " + failure
+      raise "ty type check failed:\n- " + path + ": " + failure
     }
     null
   }
@@ -221,10 +221,12 @@ type TyProject {
   let typeCheckExec(ws: Workspace!): Container! {
     let project = tool.lib.at(path)
     let packages = ["ty==" + version(ws)]
-    # The environment comes from the library, so the `uv sync` layer underneath
-    # is the same one pytest and the other checker get.
+    # The environment comes from the library, so the dependency layer
+    # underneath is the same one pytest and the other checker get.
+    # The project itself is not installed: the checker reads first-party code
+    # from the source, so it needs no build backend or compiler.
     project.step(
-      project.env(ws, with: packages),
+      project.env(ws, with: packages, installProject: false),
       project.uvRun(packages) + ["ty", "check"] + tool.args
         + project.excludeNestedFlags(ws, "--exclude", regex: false),
       "ty",

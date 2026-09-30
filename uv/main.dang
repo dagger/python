@@ -248,7 +248,7 @@ type UvProject {
   audit(ws: Workspace!): Void @check {
     let failure = auditFailure(ws)
     if (failure != null) {
-      raise path + ": " + failure
+      raise "uv audit failed:\n- " + path + ": " + failure
     }
     null
   }

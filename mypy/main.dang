@@ -197,7 +197,7 @@ type MypyProject {
   typeCheck(ws: Workspace!): Void @check {
     let failure = typeCheckFailure(ws)
     if (failure != null) {
-      raise path + ": " + failure
+      raise "mypy type check failed:\n- " + path + ": " + failure
     }
     null
   }
@@ -222,10 +222,12 @@ type MypyProject {
     # A project whose config names its files is checked as configured: a path
     # on the command line would override `files` and check everything else.
     let targets = if (configuresFiles(ws)) { [] } else { ["."] }
-    # The environment comes from the library, so the `uv sync` layer underneath
-    # is the same one pytest and the other checker get.
+    # The environment comes from the library, so the dependency layer
+    # underneath is the same one pytest and the other checker get.
+    # The project itself is not installed: the checker reads first-party code
+    # from the source, so it needs no build backend or compiler.
     project.step(
-      project.env(ws, with: packages),
+      project.env(ws, with: packages, installProject: false),
       project.uvRun(packages) + ["mypy"] + tool.args + targets
         + project.excludeNestedFlags(ws, "--exclude", regex: true),
       "mypy",
