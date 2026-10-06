@@ -256,8 +256,14 @@ class SpanContextManager:
             "tests/test_foo.py::test_func" -> ("tests/test_foo.py", None, "test_func")
             "tests/test_foo.py::TestClass::test_method" -> ("tests/test_foo.py", "TestClass", "test_method")
             "tests/test_foo.py::TestClass::test_method[param]" -> ("tests/test_foo.py", "TestClass", "test_method[param]")
+            "tests/test_foo.py::test_bar[a::b]" -> ("tests/test_foo.py", None, "test_bar[a::b]")
         """
-        parts = nodeid.split("::")
+        # Parameter ids come last, in brackets, and may themselves hold "::",
+        # so split only the part before them.
+        base, bracket, params = nodeid.partition("[")
+        parts = base.split("::")
+        if bracket:
+            parts[-1] += bracket + params
 
         if len(parts) == 1:
             # Just a module path

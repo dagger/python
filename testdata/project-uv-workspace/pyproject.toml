@@ -1,0 +1,14 @@
+[project]
+name = "project-uv-workspace"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["member-a", "uvws-plugin"]
+
+[tool.uv.workspace]
+members = [
+    "packages/*",
+]
+
+[tool.uv.sources]
+member-a = { workspace = true }
+uvws-plugin = { path = "tools/plugin", editable = true }
