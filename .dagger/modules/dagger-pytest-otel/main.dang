@@ -1,0 +1,77 @@
+"""
+Tests, packaging and PyPI publishing for the dagger-pytest-otel plugin.
+"""
+type DaggerPytestOtel {
+  let path: String! = "pytest/dagger_pytest_otel"
+
+  let lib: Pyproject! {
+    pyproject(markers: ["pyproject.toml"])
+  }
+
+  let loadEntryPoint: String! = `from importlib.metadata import entry_points; eps = entry_points(group="pytest11", name="dagger_pytest_otel"); eps or exit("no dagger_pytest_otel pytest11 entry point"); [ep.load() for ep in eps]`
+
+  """
+  Run the plugin's tests on the oldest and the newest Python it supports.
+  """
+  test(ws: Workspace!): Void @check {
+    pytest(version: "3.10", tracing: false, nesting: false).project(ws, path).test(ws)
+    pytest(version: "3.14", tracing: false, nesting: false).project(ws, path).test(ws)
+    null
+  }
+
+  """
+  Build the wheel and sdist, check them, and return the dist directory.
+
+  The check renders the metadata as PyPI does, and loads the wheel's pytest
+  entry point with its declared dependencies.
+  """
+  dist(ws: Workspace!): Directory! {
+    # A dist/ left by a local build would otherwise be uploaded with the new files.
+    let built = lib.at(path).container(ws).withoutDirectory("dist").withExec(["uv", "build"]).directory("dist")
+    let wheels = built.glob("*.whl")
+    let sdists = built.glob("*.tar.gz")
+    if (wheels.length != 1 or sdists.length != 1) {
+      raise "expected one wheel and one sdist, got: " + built.entries.join(", ")
+    }
+    lib.base
+      .withWorkdir("/release")
+      .withDirectory("dist", built)
+      .withExec(["uvx", "twine==7.0.0", "check", "--strict"] + (wheels + sdists).map { name => "dist/" + name })
+      .withExec(["uv", "run", "--isolated", "--no-project", "--with", "dist/" + (wheels[0] ?? ""), "python", "-c", loadEntryPoint])
+      .directory("dist")
+      .filter(include: wheels + sdists)
+  }
+
+  """
+  Build and check the wheel and sdist without uploading them.
+  """
+  dryRun(ws: Workspace!): Void @check {
+    dist(ws).sync
+    null
+  }
+
+  """
+  Test the plugin, then upload the wheel and sdist to PyPI.
+  """
+  publish(
+    ws: Workspace!,
+    """
+    API token for the index.
+    """
+    token: Secret!,
+    """
+    Upload endpoint, for another index than PyPI: https://test.pypi.org/legacy/
+    for TestPyPI.
+    """
+    url: String = null,
+  ): Void {
+    test(ws)
+    let release = lib.base
+      .withWorkdir("/release")
+      .withDirectory("dist", dist(ws))
+      .withSecretVariable(name: "UV_PUBLISH_TOKEN", secret: token)
+    let upload = if (url == null) { release } else { release.withEnvVariable("UV_PUBLISH_URL", url ?? "") }
+    upload.withExec(["uv", "publish"]).sync
+    null
+  }
+}

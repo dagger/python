@@ -8,7 +8,9 @@ No configuration is required - it extracts TRACEPARENT from the environment
 and creates spans for each test.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import version
+
+__version__ = version("dagger-pytest-otel")
 
 # Plugin hooks are exported from plugin.py and auto-discovered by pytest
 # via the entry point in pyproject.toml

@@ -8,7 +8,7 @@ class TestPytestConfigure:
 
     def test_configure_disables_with_no_otel_flag(self, reset_telemetry):
         """Test that --no-otel flag disables telemetry."""
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
         config = Mock()
         config.option.no_otel = True
@@ -24,7 +24,7 @@ class TestPytestConfigure:
         self, reset_telemetry, mock_otlp_exporters
     ):
         """Test that configure initializes telemetry."""
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
         config = Mock()
         config.option.no_otel = False
@@ -47,7 +47,7 @@ class TestPytestUnconfigure:
 
     def test_unconfigure_when_not_enabled(self, reset_telemetry):
         """Test unconfigure does nothing when not enabled."""
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
         config = Mock()
         plugin._enabled = False
@@ -64,8 +64,8 @@ class TestCaptureTestOutput:
 
     def test_capture_stdout(self, monkeypatch):
         """Test that stdout is captured."""
-        from pytest_otel import plugin
-        from pytest_otel.logging_handler import STDIO_STREAM_STDOUT
+        from dagger_pytest_otel import plugin
+        from dagger_pytest_otel.logging_handler import STDIO_STREAM_STDOUT
 
         mock_item = Mock()
         mock_item.nodeid = "tests/test_example.py::test_function"
@@ -74,7 +74,7 @@ class TestCaptureTestOutput:
 
         monkeypatch.setattr(plugin.tracer, "get_test_span", lambda item: mock_span)
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.emit_stdio_log",
+            "dagger_pytest_otel.logging_handler.emit_stdio_log",
             lambda body, stream, span=None: emitted.append((body, stream, span)),
         )
 
@@ -93,8 +93,8 @@ class TestCaptureTestOutput:
 
     def test_capture_stderr(self, monkeypatch):
         """Test that stderr is captured."""
-        from pytest_otel import plugin
-        from pytest_otel.logging_handler import STDIO_STREAM_STDERR
+        from dagger_pytest_otel import plugin
+        from dagger_pytest_otel.logging_handler import STDIO_STREAM_STDERR
 
         mock_item = Mock()
         mock_item.nodeid = "tests/test_example.py::test_function"
@@ -103,7 +103,7 @@ class TestCaptureTestOutput:
 
         monkeypatch.setattr(plugin.tracer, "get_test_span", lambda item: mock_span)
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.emit_stdio_log",
+            "dagger_pytest_otel.logging_handler.emit_stdio_log",
             lambda body, stream, span=None: emitted.append((body, stream, span)),
         )
 
@@ -122,8 +122,8 @@ class TestCaptureTestOutput:
 
     def test_capture_failure_details(self, monkeypatch):
         """Test that assertion details are captured as stderr logs."""
-        from pytest_otel import plugin
-        from pytest_otel.logging_handler import STDIO_STREAM_STDERR
+        from dagger_pytest_otel import plugin
+        from dagger_pytest_otel.logging_handler import STDIO_STREAM_STDERR
 
         mock_item = Mock()
         mock_item.nodeid = "tests/test_example.py::test_function"
@@ -132,7 +132,7 @@ class TestCaptureTestOutput:
 
         monkeypatch.setattr(plugin.tracer, "get_test_span", lambda item: mock_span)
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.emit_stdio_log",
+            "dagger_pytest_otel.logging_handler.emit_stdio_log",
             lambda body, stream, span=None: emitted.append((body, stream, span)),
         )
 

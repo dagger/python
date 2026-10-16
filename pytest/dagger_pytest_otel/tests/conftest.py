@@ -1,4 +1,4 @@
-"""Test configuration for pytest-otel tests."""
+"""Test configuration for dagger-pytest-otel tests."""
 
 import os
 from typing import Generator
@@ -19,8 +19,8 @@ def reset_telemetry() -> Generator[None, None, None]:
     ensures each test starts with a clean slate.
     """
     import logging
-    from pytest_otel import config
-    from pytest_otel.logging_handler import OtelLogHandler
+    from dagger_pytest_otel import config
+    from dagger_pytest_otel.logging_handler import OtelLogHandler
     from opentelemetry import trace, _logs
 
     # Remove any OtelLogHandler before the test runs
@@ -96,14 +96,14 @@ def mock_otlp_exporters(monkeypatch) -> Generator[None, None, None]:
 
     # Patch the exporter factory functions in the config module
     monkeypatch.setattr(
-        "pytest_otel.config._get_otlp_exporter", mock_get_trace_exporter
+        "dagger_pytest_otel.config._get_otlp_exporter", mock_get_trace_exporter
     )
     monkeypatch.setattr(
-        "pytest_otel.config._get_otlp_log_exporter", mock_get_log_exporter
+        "dagger_pytest_otel.config._get_otlp_log_exporter", mock_get_log_exporter
     )
 
     # Prevent atexit handler registration to avoid hanging on test completion
-    monkeypatch.setattr("pytest_otel.config.atexit.register", mock_atexit_register)
+    monkeypatch.setattr("dagger_pytest_otel.config.atexit.register", mock_atexit_register)
 
     # Mock the provider force_flush and shutdown methods to prevent timeouts
     monkeypatch.setattr(

@@ -4,6 +4,9 @@ source = "github.com/dagger/dang-sdk@collections"
 [modules.e2e]
 source = ".dagger/modules/e2e"
 
+[modules.dagger-pytest-otel]
+source = ".dagger/modules/dagger-pytest-otel"
+
 [sdks.dang]
 module = "dagger-dang-sdk"
 
@@ -40,3 +43,8 @@ clients = ["./pyproject"]
 is-module = true
 name = "e2e"
 clients = ["./pyproject", "./uv", "./mypy", "./ty", "./ruff", "./pytest"]
+
+[sdks.dang.scopes.".dagger/modules/dagger-pytest-otel"]
+is-module = true
+name = "dagger-pytest-otel"
+clients = ["./pyproject", "./pytest"]

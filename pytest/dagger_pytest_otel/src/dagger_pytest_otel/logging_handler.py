@@ -23,7 +23,7 @@ try:
 except ImportError:
     from opentelemetry.sdk._logs._internal import LogRecord
 
-from pytest_otel.config import get_logger
+from dagger_pytest_otel.config import get_logger
 
 # Dagger stdio stream constants (matches telemetry/attrs.go)
 STDIO_STREAM_STDOUT = 1

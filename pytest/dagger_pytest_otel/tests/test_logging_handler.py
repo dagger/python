@@ -3,7 +3,7 @@
 import logging
 from unittest.mock import Mock, MagicMock
 
-from pytest_otel.logging_handler import (
+from dagger_pytest_otel.logging_handler import (
     OtelLogHandler,
     emit_stdio_log,
     _get_severity,
@@ -95,13 +95,13 @@ class TestOtelLogHandler:
         mock_span.is_recording.return_value = True
 
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.trace.get_current_span", lambda: mock_span
+            "dagger_pytest_otel.logging_handler.trace.get_current_span", lambda: mock_span
         )
 
         # Mock the otel logger
         mock_logger = MagicMock()
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.get_logger", lambda: mock_logger
+            "dagger_pytest_otel.logging_handler.get_logger", lambda: mock_logger
         )
 
         handler.emit(record)
@@ -128,7 +128,7 @@ class TestEmitStdioLog:
         """Test emitting a stdout log."""
         mock_logger = Mock()
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.get_logger", lambda: mock_logger
+            "dagger_pytest_otel.logging_handler.get_logger", lambda: mock_logger
         )
 
         emit_stdio_log("test output", STDIO_STREAM_STDOUT)
@@ -142,7 +142,7 @@ class TestEmitStdioLog:
         """Test emitting a stderr log."""
         mock_logger = Mock()
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.get_logger", lambda: mock_logger
+            "dagger_pytest_otel.logging_handler.get_logger", lambda: mock_logger
         )
 
         emit_stdio_log("test error", STDIO_STREAM_STDERR)
@@ -156,7 +156,7 @@ class TestEmitStdioLog:
         """Test emitting with EOF marker."""
         mock_logger = Mock()
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.get_logger", lambda: mock_logger
+            "dagger_pytest_otel.logging_handler.get_logger", lambda: mock_logger
         )
 
         emit_stdio_log("final output", STDIO_STREAM_STDOUT, eof=True)
@@ -171,7 +171,7 @@ class TestEmitStdioLog:
         span_context = span.get_span_context()
         mock_logger = Mock()
         monkeypatch.setattr(
-            "pytest_otel.logging_handler.get_logger", lambda: mock_logger
+            "dagger_pytest_otel.logging_handler.get_logger", lambda: mock_logger
         )
 
         try:

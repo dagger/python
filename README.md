@@ -147,7 +147,7 @@ steps:
    `.python-version` and `uv.toml`, and the `pyproject.toml` of each uv
    workspace member or path source it owns. The three tools share this layer.
 2. The tool is resolved against those dependencies: `mypy==…`, `ty==…`, or
-   `pytest==…` with the bundled `pytest_otel` plugin.
+   `pytest==…` with the bundled `dagger-pytest-otel` plugin.
 3. The source is mounted. For pytest, `uv sync --locked` then installs the
    project and its local path dependencies. mypy and ty skip the project
    itself — they read first-party code from the source — and install only its
@@ -359,8 +359,8 @@ A project with no test files is not a key, and its `test` does nothing: bare
 pytest exits 5 on an empty collection, so running it there would fail a project
 whose only fault is having no tests yet.
 
-The bundled `pytest_otel` plugin is resolved with pytest against the project's
-dependencies while the environment is built (see [The Python
+The bundled `dagger-pytest-otel` plugin is resolved with pytest against the
+project's dependencies while the environment is built (see [The Python
 environment](#the-python-environment)), rather than installed over the top of a
 finished one.
 
@@ -561,3 +561,43 @@ coverage rather than a repair.
 
 The design this implements is
 [`hack/designs/python-modules-design.html`](hack/designs/python-modules-design.html).
+
+### dagger-pytest-otel
+
+`pytest/dagger_pytest_otel` is the plugin the pytest module bundles, published
+to PyPI as `dagger-pytest-otel`. Its own module runs its tests and builds and
+checks its wheel and sdist:
+
+```sh
+dagger check --dagger-pytest-otel
+```
+
+To release it:
+
+1. Bump the version, which updates `pyproject.toml` and `uv.lock`:
+
+   ```sh
+   uv version --project pytest/dagger_pytest_otel --bump minor --no-sync
+   ```
+
+2. Commit both files and merge the change.
+3. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
+
+For a pre-release, set the version itself, for example
+`uv version --project pytest/dagger_pytest_otel 0.2.0rc1 --no-sync`, and tag
+`dagger-pytest-otel/v0.2.0rc1`. From there, `--bump rc` gives `0.2.0rc2` and
+`--bump stable` gives `0.2.0`. pip and uv skip a pre-release unless no final
+release matches the request.
+
+The tag runs `.github/workflows/publish-dagger-pytest-otel.yml`, which runs
+this module's checks and then its `publish` function, with the PyPI API token
+stored as the `DAGGER_PYTEST_OTEL_PYPI_TOKEN` secret of the `pypi` environment.
+
+To publish without the workflow, pass a PyPI API token yourself:
+
+```sh
+dagger api call dagger-pytest-otel publish --token env:PYPI_TOKEN
+```
+
+To rehearse on TestPyPI, add `--url https://test.pypi.org/legacy/` and pass a
+TestPyPI token.

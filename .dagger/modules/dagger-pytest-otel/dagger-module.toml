@@ -1,0 +1,13 @@
+name = "dagger-pytest-otel"
+engineVersion = "v1.0.0-beta.15"
+
+[runtime]
+  source = "dang"
+
+[[dependencies]]
+  name = "pyproject"
+  source = "../../../pyproject"
+
+[[dependencies]]
+  name = "pytest"
+  source = "../../../pytest"

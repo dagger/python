@@ -1,4 +1,4 @@
-# pytest-otel
+# dagger-pytest-otel
 
 A pytest plugin for OpenTelemetry instrumentation with Dagger.
 
@@ -17,7 +17,7 @@ This plugin automatically instruments pytest tests with OpenTelemetry spans, ena
 ## Installation
 
 ```bash
-pip install pytest-otel
+pip install dagger-pytest-otel
 ```
 
 ## Usage
@@ -28,6 +28,8 @@ Once installed, the plugin is automatically enabled. No code changes are require
 
 When running tests through Dagger, the `TRACEPARENT` environment variable is automatically set, and test spans will appear in the Dagger TUI and Dagger Cloud.
 
+The [pytest module](https://github.com/dagger/python/tree/main/pytest) bundles this plugin. A module that builds its own test container installs it:
+
 ```python
 # In your Dagger module
 @function
@@ -37,7 +39,7 @@ async def test(self, source: dagger.Directory) -> str:
         .from_("python:3.11-slim")
         .with_directory("/src", source)
         .with_workdir("/src")
-        .with_exec(["pip", "install", "pytest", "pytest-otel"])
+        .with_exec(["pip", "install", "pytest", "dagger-pytest-otel"])
         .with_exec(["pytest", "-v"])
         .stdout()
     )
@@ -83,9 +85,8 @@ also forwarded as OpenTelemetry logs and mapped to stdout or stderr by severity.
 ## Development
 
 ```bash
-cd sdk/python/pytest_otel
-pip install -e ".[dev]"
-pytest
+cd pytest/dagger_pytest_otel
+uv run pytest
 ```
 
 ## License
