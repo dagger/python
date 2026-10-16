@@ -189,8 +189,9 @@ def pytest_runtest_makereport(
         # Track call phase outcome if no failure yet
         _test_outcomes[item.nodeid] = report.outcome
 
-    # Record exceptions from the call phase
-    if call.excinfo and report.when == "call":
+    # A skip or an xfail raises too, but it is an outcome with a reason, not a
+    # failure.
+    if call.excinfo and report.failed:
         try:
             tracer.record_exception(item, call.excinfo.value)
         except Exception as e:

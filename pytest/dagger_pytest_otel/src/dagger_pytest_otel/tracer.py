@@ -213,11 +213,27 @@ class SpanContextManager:
         return node.span if node else None
 
     def _session_suite_name(self, session: "pytest.Session") -> str:
-        """Return a semantic-convention test suite name for the pytest session."""
+        """Return the rootdir relative to the nearest ancestor holding .git.
+
+        That ancestor is the workspace root as Dagger defines it. At the
+        workspace root itself, or outside one, the rootdir's name stands in.
+        """
         rootpath = getattr(session.config, "rootpath", None)
-        if rootpath:
-            return str(rootpath)
-        return "pytest"
+        if not rootpath:
+            return "pytest"
+        # On Python 3.10, exists() raises for an unreadable ancestor, which
+        # would stop the session span from starting at all.
+        try:
+            # Resolved, so that a symlinked rootdir still finds its workspace.
+            resolved = rootpath.resolve()
+            for ancestor in (resolved, *resolved.parents):
+                if (ancestor / ".git").exists():
+                    if ancestor != resolved:
+                        return resolved.relative_to(ancestor).as_posix()
+                    break
+        except OSError:
+            pass
+        return rootpath.name or "pytest"
 
     def _test_suite_name(self, nodeid: str) -> Optional[str]:
         """Return a semantic-convention test suite name for a pytest nodeid."""

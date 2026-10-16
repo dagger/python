@@ -55,6 +55,14 @@ export TRACEPARENT="00-abc123...-def456...-01"  # Optional parent trace
 pytest
 ```
 
+The plugin sends OTLP over HTTP to an `http://` or `https://` endpoint, and over
+gRPC to an endpoint without a scheme. `OTEL_EXPORTER_OTLP_PROTOCOL` (`grpc` or
+`http/protobuf`) overrides that choice, and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`
+or `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` overrides it for one signal; any other
+value sends `http/protobuf` with a warning. gRPC needs the
+`opentelemetry-exporter-otlp-proto-grpc` package; without it, the plugin warns
+and exports nothing.
+
 ### Disabling
 
 To disable instrumentation:
@@ -74,13 +82,22 @@ Each test span includes the following attributes:
 | `test.case.result.status` | Test result (`pass`/`fail`/`skipped`) |
 | `test.suite.name` | Pytest suite containing the test case |
 
-Session spans also include `test.suite.run.status`.
+Session spans also include `test.suite.run.status`. Their `test.suite.name` is
+the pytest rootdir relative to the nearest directory holding `.git`, or the
+rootdir's name at that directory or outside Git; 0.3.0 used the absolute path.
+
+Spans and logs report the service name `pytest`, unless `OTEL_SERVICE_NAME` or
+`OTEL_RESOURCE_ATTRIBUTES` sets one.
 
 ## Test output
 
 Captured stdout and stderr output is exported as OpenTelemetry logs on the active
 test span using Dagger's `stdio.stream` attribute. Python logging records are
 also forwarded as OpenTelemetry logs and mapped to stdout or stderr by severity.
+
+Python's root logger drops records below `WARNING` before the plugin sees them.
+Set pytest's `log_level`, for example with `--log-level=INFO`, to forward
+`INFO` records too.
 
 ## Development
 

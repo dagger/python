@@ -11,12 +11,15 @@ from opentelemetry._logs import set_logger_provider
 from opentelemetry.sdk import _logs as sdklogs
 from opentelemetry.sdk import trace as sdktrace
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.resources import SERVICE_NAME, OTELResourceDetector, Resource
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 
 logger = logging.getLogger(__name__)
 
 # Timeout for flushing spans/logs (in milliseconds)
 FLUSH_TIMEOUT_MS = 30000
+
+DEFAULT_SERVICE_NAME = "pytest"
 
 
 def _set_env_if_unset(name: str, value: Optional[str]) -> None:
@@ -38,6 +41,32 @@ def _log_endpoint(endpoint: Optional[str]) -> Optional[str]:
     return f"{normalized[: -len(suffix)]}/v1/logs"
 
 
+def _resource() -> Resource:
+    """The resource for spans and logs, named pytest unless the environment names it."""
+    # Resource.create lets its argument override the environment, so the
+    # environment's attributes are merged back on top.
+    return Resource.create({SERVICE_NAME: DEFAULT_SERVICE_NAME}).merge(
+        OTELResourceDetector().detect()
+    )
+
+
+def _protocol(endpoint: str, signal: str) -> str:
+    """The OTLP protocol for a signal: the environment's choice, else the endpoint's scheme."""
+    return (
+        os.environ.get(f"OTEL_EXPORTER_OTLP_{signal}_PROTOCOL")
+        or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+        or ("http/protobuf" if endpoint.startswith(("http://", "https://")) else "grpc")
+    )
+
+
+_GRPC_MISSING = (
+    "OTLP over gRPC needs the opentelemetry-exporter-otlp-proto-grpc package. "
+    "Install it, or use an http:// endpoint with %s=http/protobuf. "
+    "%s will not be exported."
+)
+_UNSUPPORTED = "OTLP protocol %r is not supported, sending http/protobuf instead."
+
+
 def _get_otlp_exporter() -> Optional[SpanExporter]:
     """Get OTLP span exporter if configured."""
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or os.environ.get(
@@ -46,23 +75,22 @@ def _get_otlp_exporter() -> Optional[SpanExporter]:
     if not endpoint:
         return None
 
-    try:
-        # Try gRPC first, fall back to HTTP
-        if endpoint.startswith("http://") or endpoint.startswith("https://"):
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter,
-            )
-
-            return OTLPSpanExporter()
-        else:
+    protocol = _protocol(endpoint, "TRACES")
+    if protocol == "grpc":
+        try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                OTLPSpanExporter,
+                OTLPSpanExporter as GrpcSpanExporter,
             )
+        except ImportError:
+            logger.warning(_GRPC_MISSING, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "Spans")
+            return None
+        return GrpcSpanExporter()
 
-            return OTLPSpanExporter()
-    except ImportError:
-        logger.warning("OTLP exporter not available, spans will not be exported")
-        return None
+    if protocol != "http/protobuf":
+        logger.warning(_UNSUPPORTED, protocol)
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+    return OTLPSpanExporter()
 
 
 def _get_otlp_log_exporter():
@@ -73,22 +101,22 @@ def _get_otlp_log_exporter():
     if not endpoint:
         return None
 
-    try:
-        if endpoint.startswith("http://") or endpoint.startswith("https://"):
-            from opentelemetry.exporter.otlp.proto.http._log_exporter import (
-                OTLPLogExporter,
-            )
-
-            return OTLPLogExporter()
-        else:
+    protocol = _protocol(endpoint, "LOGS")
+    if protocol == "grpc":
+        try:
             from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
-                OTLPLogExporter,
+                OTLPLogExporter as GrpcLogExporter,
             )
+        except ImportError:
+            logger.warning(_GRPC_MISSING, "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "Logs")
+            return None
+        return GrpcLogExporter()
 
-            return OTLPLogExporter()
-    except ImportError:
-        logger.warning("OTLP log exporter not available, logs will not be exported")
-        return None
+    if protocol != "http/protobuf":
+        logger.warning(_UNSUPPORTED, protocol)
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+    return OTLPLogExporter()
 
 
 class TelemetryConfig:
@@ -138,17 +166,19 @@ class TelemetryConfig:
 
     def _prepare_env(self) -> None:
         """Prepare environment for OTLP configuration."""
-        if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        logs_endpoint = _log_endpoint(os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+        if (
+            logs_endpoint
+            and not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            and "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in os.environ
+        ):
+            os.environ["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = logs_endpoint
+            # Logs then go where traces go, so only then do they take the traces
+            # protocol; otherwise it would override the generic one for logs.
             _set_env_if_unset(
-                "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-                _log_endpoint(os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")),
+                "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+                os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"),
             )
-
-        _set_env_if_unset(
-            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
-            os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
-            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL"),
-        )
 
         # Auto-configure insecure flag for http:// endpoints
         endpoint_vars = [
@@ -183,7 +213,7 @@ class TelemetryConfig:
 
     def _init_tracer(self) -> None:
         """Initialize the tracer provider with OTLP exporter."""
-        self._tracer_provider = sdktrace.TracerProvider()
+        self._tracer_provider = sdktrace.TracerProvider(resource=_resource())
 
         exporter = _get_otlp_exporter()
         if exporter:
@@ -195,7 +225,7 @@ class TelemetryConfig:
 
     def _init_logger(self) -> None:
         """Initialize the logger provider with OTLP exporter."""
-        self._logger_provider = sdklogs.LoggerProvider()
+        self._logger_provider = sdklogs.LoggerProvider(resource=_resource())
 
         exporter = _get_otlp_log_exporter()
         if exporter:
