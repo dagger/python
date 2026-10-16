@@ -576,13 +576,17 @@ To release it:
 
 1. Set the version in `pytest/dagger_pytest_otel/pyproject.toml`, for example
    with `uv version --bump minor`, and merge the change.
-2. Publish the merged commit with a PyPI API token:
+2. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
 
-   ```sh
-   dagger api call dagger-pytest-otel publish --token env:PYPI_TOKEN
-   ```
+The tag runs `.github/workflows/publish-dagger-pytest-otel.yml`, which builds
+and checks the wheel and sdist with this module and uploads them with PyPI
+Trusted Publishing.
 
-3. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
+To publish without the workflow, use a PyPI API token:
+
+```sh
+dagger api call dagger-pytest-otel publish --token env:PYPI_TOKEN
+```
 
 To rehearse on TestPyPI, add `--url https://test.pypi.org/legacy/` and pass a
 TestPyPI token.
