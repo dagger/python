@@ -9,6 +9,7 @@
 ["","git-sha",["github.com/dagger/sdk-helpers","refs/tags/v1.0.4"],"6c883f657933ecb06ae86d56d9cd1f8785346bb1"]
 ["","git-sha",["github.com/dagger/sdk-helpers","refs/tags/v1.0.5"],"2d593321b19e3519584b1bbd6e77d83b2be9de2f"]
 ["","oci-sha",["docker.io/library/alpine:3.24.1"],"sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b"]
+["","oci-sha",["docker.io/library/python:3.10-slim"],"sha256:6ff506466f8b1e981719b468cc0023b8ef000b983cdec0eafe119d01f379e31d"]
 ["","oci-sha",["docker.io/library/python:3.14-slim"],"sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d"]
 ["","oci-sha",["ghcr.io/astral-sh/ruff:0.15.22"],"sha256:d9e5710276b88ae2c0a33bd394aeb2877f5f852e23235ebcaa1c5bda4998569a"]
 ["","oci-sha",["ghcr.io/astral-sh/ruff:0.16.5"],"sha256:8355b79edf35788aef97ac9b1ff3b758604a5d67963ead617c45c72e1d92871f"]

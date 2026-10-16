@@ -561,3 +561,28 @@ coverage rather than a repair.
 
 The design this implements is
 [`hack/designs/python-modules-design.html`](hack/designs/python-modules-design.html).
+
+### dagger-pytest-otel
+
+`pytest/dagger_pytest_otel` is the plugin the pytest module bundles, published
+to PyPI as `dagger-pytest-otel`. Its own module runs its tests and builds and
+checks its wheel and sdist:
+
+```sh
+dagger check -m .dagger/modules/dagger-pytest-otel
+```
+
+To release it:
+
+1. Set the version in `pytest/dagger_pytest_otel/pyproject.toml`, for example
+   with `uv version --bump minor`, and merge the change.
+2. Publish the merged commit with a PyPI API token:
+
+   ```sh
+   dagger api call dagger-pytest-otel publish --token env:PYPI_TOKEN
+   ```
+
+3. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
+
+To rehearse on TestPyPI, add `--url https://test.pypi.org/legacy/` and pass a
+TestPyPI token.
