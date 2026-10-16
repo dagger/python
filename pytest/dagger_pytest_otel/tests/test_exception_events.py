@@ -29,6 +29,21 @@ SOURCE = """
     @pytest.mark.xfail(reason="known bug")
     def test_xfails():
         assert False
+
+    @pytest.fixture
+    def broken_setup():
+        raise RuntimeError("setup failed")
+
+    @pytest.fixture
+    def broken_teardown():
+        yield
+        raise RuntimeError("teardown failed")
+
+    def test_setup_error(broken_setup):
+        pass
+
+    def test_teardown_error(broken_teardown):
+        pass
 """
 
 
@@ -76,6 +91,10 @@ def skip() -> None:
     pytest.skip("no credentials")
 
 
+def broken() -> None:
+    raise RuntimeError("fixture failed")
+
+
 class TestExceptionEvents:
     def test_a_failure_is_recorded(self, reports, recorded):
         call = raising(fail, "call")
@@ -93,6 +112,20 @@ class TestExceptionEvents:
         make_report(report_for(reports, "test_xfails", "call"), raising(fail, "call"))
 
         assert recorded == []
+
+    def test_a_setup_error_is_recorded(self, reports, recorded):
+        call = raising(broken, "setup")
+
+        make_report(report_for(reports, "test_setup_error", "setup"), call)
+
+        assert recorded == [call.excinfo.value]
+
+    def test_a_teardown_error_is_recorded(self, reports, recorded):
+        call = raising(broken, "teardown")
+
+        make_report(report_for(reports, "test_teardown_error", "teardown"), call)
+
+        assert recorded == [call.excinfo.value]
 
 
 class _ItemStub:

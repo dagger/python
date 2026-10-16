@@ -191,7 +191,7 @@ def pytest_runtest_makereport(
 
     # A skip or an xfail raises too, but it is an outcome with a reason, not a
     # failure.
-    if call.excinfo and report.when == "call" and report.failed:
+    if call.excinfo and report.failed:
         try:
             tracer.record_exception(item, call.excinfo.value)
         except Exception as e:
