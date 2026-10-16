@@ -1,5 +1,6 @@
 """Tests for the tracer module."""
 
+from pathlib import Path
 from unittest.mock import Mock
 
 from opentelemetry.trace import StatusCode
@@ -158,3 +159,84 @@ class TestAttributeNames:
         assert tracer.TEST_CASE_RESULT_STATUS == test_attributes.TEST_CASE_RESULT_STATUS
         assert tracer.TEST_SUITE_NAME == test_attributes.TEST_SUITE_NAME
         assert tracer.TEST_SUITE_RUN_STATUS == test_attributes.TEST_SUITE_RUN_STATUS
+
+
+class TestSessionSuiteName:
+    """The session is named by its rootdir relative to the workspace root.
+
+    The workspace root is the nearest ancestor holding .git, as Dagger defines
+    it, so the name matches the project's path in a Dagger workspace and does
+    not carry a machine-specific absolute path.
+    """
+
+    @staticmethod
+    def name_for(rootpath):
+        session = Mock()
+        session.config.rootpath = rootpath
+        return SpanContextManager()._session_suite_name(session)
+
+    def test_a_project_below_the_workspace_root(self, tmp_path):
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        rootdir = tmp_path / "ws" / "apps" / "web"
+        rootdir.mkdir(parents=True)
+
+        assert self.name_for(rootdir) == "apps/web"
+
+    def test_the_workspace_root_itself(self, tmp_path):
+        rootdir = tmp_path / "ws"
+        (rootdir / ".git").mkdir(parents=True)
+
+        assert self.name_for(rootdir) == "ws"
+
+    def test_outside_a_git_workspace(self, tmp_path, monkeypatch):
+        rootdir = tmp_path / "plain" / "proj"
+        rootdir.mkdir(parents=True)
+        # tmp_path itself may sit inside a checkout, for example with --basetemp.
+        exists = Path.exists
+        inside = tmp_path.resolve()
+        monkeypatch.setattr(
+            Path,
+            "exists",
+            lambda path, *args, **kwargs: exists(path, *args, **kwargs)
+            and (path.name != ".git" or inside in path.parents),
+        )
+
+        assert self.name_for(rootdir) == "proj"
+
+    def test_an_unreadable_ancestor_falls_back_to_the_name(self, tmp_path, monkeypatch):
+        rootdir = tmp_path / "ws" / "apps" / "web"
+        rootdir.mkdir(parents=True)
+
+        def denied(path, *args, **kwargs):
+            raise PermissionError(path)
+
+        monkeypatch.setattr(Path, "exists", denied)
+
+        assert self.name_for(rootdir) == "web"
+
+    def test_a_worktree_git_file(self, tmp_path):
+        (tmp_path / "wt").mkdir()
+        (tmp_path / "wt" / ".git").write_text("gitdir: /elsewhere/.git/worktrees/wt\n")
+        rootdir = tmp_path / "wt" / "pkg"
+        rootdir.mkdir()
+
+        assert self.name_for(rootdir) == "pkg"
+
+    def test_the_nearest_git_wins(self, tmp_path):
+        (tmp_path / "outer" / ".git").mkdir(parents=True)
+        submodule = tmp_path / "outer" / "vendor" / "lib"
+        submodule.mkdir(parents=True)
+        (submodule / ".git").write_text("gitdir: ../../.git/modules/lib\n")
+        rootdir = submodule / "src"
+        rootdir.mkdir()
+
+        assert self.name_for(rootdir) == "src"
+
+    def test_a_symlinked_rootdir(self, tmp_path):
+        (tmp_path / "ws" / ".git").mkdir(parents=True)
+        target = tmp_path / "ws" / "apps" / "web"
+        target.mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+
+        assert self.name_for(link) == "apps/web"

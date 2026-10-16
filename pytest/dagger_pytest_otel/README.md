@@ -82,7 +82,9 @@ Each test span includes the following attributes:
 | `test.case.result.status` | Test result (`pass`/`fail`/`skipped`) |
 | `test.suite.name` | Pytest suite containing the test case |
 
-Session spans also include `test.suite.run.status`.
+Session spans also include `test.suite.run.status`. Their `test.suite.name` is
+the pytest rootdir relative to the nearest directory holding `.git`, or the
+rootdir's name at that directory or outside Git; 0.3.0 used the absolute path.
 
 Spans and logs report the service name `pytest`, unless `OTEL_SERVICE_NAME` or
 `OTEL_RESOURCE_ATTRIBUTES` sets one.
