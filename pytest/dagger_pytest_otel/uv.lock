@@ -118,6 +118,7 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
+    { name = "pluggy" },
     { name = "pytest" },
 ]
 
@@ -133,6 +134,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.39.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.39.1" },
     { name = "opentelemetry-semantic-conventions", specifier = ">=0.60b1" },
+    { name = "pluggy", specifier = ">=1.2.0" },
     { name = "pytest", specifier = ">=7.0.0" },
 ]
 
