@@ -76,6 +76,9 @@ Each test span includes the following attributes:
 
 Session spans also include `test.suite.run.status`.
 
+Spans and logs report the service name `pytest`, unless `OTEL_SERVICE_NAME` or
+`OTEL_RESOURCE_ATTRIBUTES` sets one.
+
 ## Test output
 
 Captured stdout and stderr output is exported as OpenTelemetry logs on the active

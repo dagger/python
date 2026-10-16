@@ -109,3 +109,45 @@ class TestTelemetryConfig:
         TelemetryConfig()._prepare_env()
 
         assert "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in os.environ
+
+
+class TestServiceName:
+    """Without a service name, a trace backend files every run under unknown_service."""
+
+    def test_defaults_to_pytest(self, no_otel_env):
+        from dagger_pytest_otel.config import _resource
+
+        assert _resource().attributes["service.name"] == "pytest"
+
+    def test_otel_service_name_wins(self, monkeypatch, no_otel_env):
+        from dagger_pytest_otel.config import _resource
+
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "checkout-tests")
+
+        assert _resource().attributes["service.name"] == "checkout-tests"
+
+    def test_resource_attributes_win(self, monkeypatch, no_otel_env):
+        from dagger_pytest_otel.config import _resource
+
+        monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=billing,team=qa")
+
+        attributes = _resource().attributes
+        assert attributes["service.name"] == "billing"
+        assert attributes["team"] == "qa"
+
+    def test_otel_service_name_beats_resource_attributes(self, monkeypatch, no_otel_env):
+        from dagger_pytest_otel.config import _resource
+
+        monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=billing")
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "checkout-tests")
+
+        assert _resource().attributes["service.name"] == "checkout-tests"
+
+    def test_spans_and_logs_carry_it(self, reset_telemetry, mock_otlp_exporters, no_otel_env):
+        from dagger_pytest_otel.config import TelemetryConfig
+
+        config = TelemetryConfig()
+        config.configure()
+
+        assert config._tracer_provider.resource.attributes["service.name"] == "pytest"
+        assert config._logger_provider.resource.attributes["service.name"] == "pytest"

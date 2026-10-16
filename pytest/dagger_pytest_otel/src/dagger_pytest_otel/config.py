@@ -11,12 +11,15 @@ from opentelemetry._logs import set_logger_provider
 from opentelemetry.sdk import _logs as sdklogs
 from opentelemetry.sdk import trace as sdktrace
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.sdk.resources import SERVICE_NAME, OTELResourceDetector, Resource
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 
 logger = logging.getLogger(__name__)
 
 # Timeout for flushing spans/logs (in milliseconds)
 FLUSH_TIMEOUT_MS = 30000
+
+DEFAULT_SERVICE_NAME = "pytest"
 
 
 def _set_env_if_unset(name: str, value: Optional[str]) -> None:
@@ -36,6 +39,15 @@ def _log_endpoint(endpoint: Optional[str]) -> Optional[str]:
         return None
 
     return f"{normalized[: -len(suffix)]}/v1/logs"
+
+
+def _resource() -> Resource:
+    """The resource for spans and logs, named pytest unless the environment names it."""
+    # Resource.create lets its argument override the environment, so the
+    # environment's attributes are merged back on top.
+    return Resource.create({SERVICE_NAME: DEFAULT_SERVICE_NAME}).merge(
+        OTELResourceDetector().detect()
+    )
 
 
 def _get_otlp_exporter() -> Optional[SpanExporter]:
@@ -183,7 +195,7 @@ class TelemetryConfig:
 
     def _init_tracer(self) -> None:
         """Initialize the tracer provider with OTLP exporter."""
-        self._tracer_provider = sdktrace.TracerProvider()
+        self._tracer_provider = sdktrace.TracerProvider(resource=_resource())
 
         exporter = _get_otlp_exporter()
         if exporter:
@@ -195,7 +207,7 @@ class TelemetryConfig:
 
     def _init_logger(self) -> None:
         """Initialize the logger provider with OTLP exporter."""
-        self._logger_provider = sdklogs.LoggerProvider()
+        self._logger_provider = sdklogs.LoggerProvider(resource=_resource())
 
         exporter = _get_otlp_log_exporter()
         if exporter:
