@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dagger-pytest-otel"
-version = "0.3.0"
+version = "0.3.1"
 description = "Pytest plugin for OpenTelemetry instrumentation with Dagger"
 readme = "README.md"
 authors = [{ name = "Dagger", email = "hello@dagger.io" }]
