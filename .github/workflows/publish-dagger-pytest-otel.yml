@@ -4,13 +4,13 @@ on:
   push:
     tags: ["dagger-pytest-otel/v*"]
 
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    environment: pypi
     steps:
       - uses: actions/checkout@v7
         with:
@@ -28,26 +28,9 @@ jobs:
           version: "1.0.0-beta.18"
           verb: check
           args: --dagger-pytest-otel
-      - name: Build
-        uses: dagger/dagger-for-github@v8.4.1
-        with:
-          version: "1.0.0-beta.18"
-          verb: api
-          args: call dagger-pytest-otel dist --output dist
-      - uses: actions/upload-artifact@v7
-        with:
-          name: dist
-          path: dist/
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      # A second dagger-for-github step fails: v8.4.1 cannot read a v1 CLI's
+      # version. Calling the CLI directly also keeps the token out of its installer.
+      - name: Publish
+        run: dagger --progress plain api call dagger-pytest-otel publish --token env:PYPI_TOKEN
+        env:
+          PYPI_TOKEN: ${{ secrets.DAGGER_PYTEST_OTEL_PYPI_TOKEN }}

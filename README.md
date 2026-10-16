@@ -584,10 +584,10 @@ To release it:
 3. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
 
 The tag runs `.github/workflows/publish-dagger-pytest-otel.yml`, which runs
-this module's checks, builds the wheel and sdist with it, and uploads them with
-PyPI Trusted Publishing.
+this module's checks and then its `publish` function, with the PyPI API token
+stored as the `DAGGER_PYTEST_OTEL_PYPI_TOKEN` secret of the `pypi` environment.
 
-To publish without the workflow, use a PyPI API token:
+To publish without the workflow, pass a PyPI API token yourself:
 
 ```sh
 dagger api call dagger-pytest-otel publish --token env:PYPI_TOKEN
