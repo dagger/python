@@ -1,6 +1,34 @@
 """Tests for the config module."""
 
 import os
+import sys
+import types
+
+import pytest
+
+GRPC_EXPORTERS = (
+    "opentelemetry.exporter.otlp.proto.grpc.trace_exporter",
+    "opentelemetry.exporter.otlp.proto.grpc._log_exporter",
+)
+
+
+class _GrpcExporter:
+    pass
+
+
+@pytest.fixture
+def with_grpc(monkeypatch):
+    """A stand-in for the optional gRPC exporter package."""
+    fake = types.SimpleNamespace(OTLPSpanExporter=_GrpcExporter, OTLPLogExporter=_GrpcExporter)
+    for name in GRPC_EXPORTERS:
+        monkeypatch.setitem(sys.modules, name, fake)
+
+
+@pytest.fixture
+def without_grpc(monkeypatch):
+    """The optional gRPC exporter package missing, whether or not it is installed."""
+    for name in GRPC_EXPORTERS:
+        monkeypatch.setitem(sys.modules, name, None)
 
 
 class TestTelemetryConfig:
@@ -165,14 +193,21 @@ class TestProtocol:
 
         assert isinstance(_get_otlp_exporter(), OTLPSpanExporter)
 
-    def test_the_protocol_variable_wins_over_the_scheme(self, monkeypatch, no_otel_env, caplog):
+    def test_an_endpoint_without_a_scheme_uses_grpc(self, monkeypatch, no_otel_env, with_grpc):
+        from dagger_pytest_otel.config import _get_otlp_exporter, _get_otlp_log_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
+
+        assert isinstance(_get_otlp_exporter(), _GrpcExporter)
+        assert isinstance(_get_otlp_log_exporter(), _GrpcExporter)
+
+    def test_the_protocol_variable_wins_over_the_scheme(self, monkeypatch, no_otel_env, with_grpc):
         from dagger_pytest_otel.config import _get_otlp_exporter
 
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
 
-        assert _get_otlp_exporter() is None
-        assert "opentelemetry-exporter-otlp-proto-grpc" in caplog.text
+        assert isinstance(_get_otlp_exporter(), _GrpcExporter)
 
     def test_the_signal_protocol_wins_over_the_generic_one(self, monkeypatch, no_otel_env):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -185,7 +220,9 @@ class TestProtocol:
 
         assert isinstance(_get_otlp_exporter(), OTLPSpanExporter)
 
-    def test_a_missing_grpc_exporter_says_how_to_fix_it(self, monkeypatch, no_otel_env, caplog):
+    def test_a_missing_grpc_exporter_says_how_to_fix_it(
+        self, monkeypatch, no_otel_env, without_grpc, caplog
+    ):
         from dagger_pytest_otel.config import _get_otlp_exporter, _get_otlp_log_exporter
 
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
