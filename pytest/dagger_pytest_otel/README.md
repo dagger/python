@@ -91,6 +91,10 @@ Captured stdout and stderr output is exported as OpenTelemetry logs on the activ
 test span using Dagger's `stdio.stream` attribute. Python logging records are
 also forwarded as OpenTelemetry logs and mapped to stdout or stderr by severity.
 
+Python's root logger drops records below `WARNING` before the plugin sees them.
+Set pytest's `log_level`, for example with `--log-level=INFO`, to forward
+`INFO` records too.
+
 ## Development
 
 ```bash
