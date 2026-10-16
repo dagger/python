@@ -7,12 +7,10 @@ on:
 permissions: {}
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -30,4 +28,20 @@ jobs:
           version: "1.0.0-beta.18"
           verb: api
           args: call dagger-pytest-otel dist --output dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
