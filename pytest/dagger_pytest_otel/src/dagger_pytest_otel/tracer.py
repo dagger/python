@@ -15,7 +15,7 @@ from opentelemetry.semconv._incubating.attributes.test_attributes import (
 )
 from opentelemetry.trace import Span, Status, StatusCode
 
-from pytest_otel.config import get_tracer
+from dagger_pytest_otel.config import get_tracer
 
 if TYPE_CHECKING:
     import pytest

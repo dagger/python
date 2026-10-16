@@ -11,9 +11,9 @@ from typing import Dict, Generator, Optional
 import pytest
 from _pytest.reports import TestReport
 
-from pytest_otel import config as otel_config
-from pytest_otel import tracer
-from pytest_otel.logging_handler import OtelLogHandler
+from dagger_pytest_otel import config as otel_config
+from dagger_pytest_otel import tracer
+from dagger_pytest_otel.logging_handler import OtelLogHandler
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +235,7 @@ def _capture_test_output(item: pytest.Item, report: TestReport) -> None:
     logs are associated with the correct test span, rather than relying on implicit
     context propagation which can be unreliable during pytest hook execution.
     """
-    from pytest_otel.logging_handler import (
+    from dagger_pytest_otel.logging_handler import (
         STDIO_STREAM_STDERR,
         STDIO_STREAM_STDOUT,
         emit_stdio_log,

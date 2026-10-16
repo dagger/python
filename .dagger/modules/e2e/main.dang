@@ -1086,10 +1086,10 @@ type E2e {
   }
 
   """
-  The pytest module bundles the pytest_otel plugin's source, so it is a project
-  of this workspace too. It is checked in its own repository, not here.
+  The pytest module bundles the dagger-pytest-otel plugin's source, so it is a
+  project of this workspace too. It is checked in its own repository, not here.
   """
-  let otelSource: String! = "pytest/pytest_otel"
+  let otelSource: String! = "pytest/dagger_pytest_otel"
 
   let skipFixture: String! = "testdata/project-skip"
 

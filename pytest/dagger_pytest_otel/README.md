@@ -1,4 +1,4 @@
-# pytest-otel
+# dagger-pytest-otel
 
 A pytest plugin for OpenTelemetry instrumentation with Dagger.
 
@@ -17,7 +17,7 @@ This plugin automatically instruments pytest tests with OpenTelemetry spans, ena
 ## Installation
 
 ```bash
-pip install pytest-otel
+pip install dagger-pytest-otel
 ```
 
 ## Usage
@@ -37,7 +37,7 @@ async def test(self, source: dagger.Directory) -> str:
         .from_("python:3.11-slim")
         .with_directory("/src", source)
         .with_workdir("/src")
-        .with_exec(["pip", "install", "pytest", "pytest-otel"])
+        .with_exec(["pip", "install", "pytest", "dagger-pytest-otel"])
         .with_exec(["pytest", "-v"])
         .stdout()
     )

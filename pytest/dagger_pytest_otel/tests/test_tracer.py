@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 from opentelemetry.trace import StatusCode
 
-from pytest_otel.tracer import SpanContextManager, TestNode as OtelTestNode
+from dagger_pytest_otel.tracer import SpanContextManager, TestNode as OtelTestNode
 
 
 class TestParseNodeid:
@@ -143,7 +143,7 @@ class TestAttributeNames:
 
     def test_attribute_names(self):
         """Verify attribute names for Dagger UI and OTel test semconv integration."""
-        from pytest_otel import tracer
+        from dagger_pytest_otel import tracer
 
         from opentelemetry.semconv._incubating.attributes import test_attributes
 

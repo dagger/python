@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pytest-otel"
+name = "dagger-pytest-otel"
 version = "0.1.0"
 description = "Pytest plugin for OpenTelemetry instrumentation with Dagger"
 readme = "README.md"
@@ -37,16 +37,16 @@ dev = [
 ]
 
 [project.entry-points.pytest11]
-pytest_otel = "pytest_otel.plugin"
+dagger_pytest_otel = "dagger_pytest_otel.plugin"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/pytest_otel"]
+packages = ["src/dagger_pytest_otel"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Disable the pytest_otel plugin when running tests on itself
+# Disable the dagger_pytest_otel plugin when running tests on itself
 # to prevent the plugin from interfering with its own tests
-addopts = "-p no:pytest_otel"
+addopts = "-p no:dagger_pytest_otel"
 
 [tool.mypy]
 strict = true

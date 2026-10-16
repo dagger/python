@@ -8,9 +8,9 @@ test run is the same layer mypy and ty get. There is no runner probing and no
 pip path here: this module is uv-based, and a caller who needs something else
 supplies its own base image.
 
-pytest_otel, the bundled OpenTelemetry plugin, is resolved alongside pytest and
-the project's own dependencies in one uv pass. Installing it over the top of a
-finished environment resolves nothing, so a conflict passes unnoticed.
+dagger-pytest-otel, the bundled OpenTelemetry plugin, is resolved alongside
+pytest and the project's own dependencies in one uv pass. Installing it over the
+top of a finished environment resolves nothing, so a conflict passes unnoticed.
 
 https://dagger.io
 https://pytest.org
@@ -129,10 +129,10 @@ type Pytest {
   }
 
   """
-  The bundled pytest_otel plugin, for a caller wiring up its own container.
+  The bundled dagger-pytest-otel plugin, for a caller wiring up its own container.
   """
   pytestOtel: Directory! {
-    currentModule.source.directory("pytest_otel")
+    currentModule.source.directory("dagger_pytest_otel")
   }
 
   """
@@ -365,15 +365,15 @@ type PytestProject {
   let testExec(ws: Workspace!, files: [String!]!): Container! {
     let project = tool.lib.at(path)
 
-    # pytest_otel is not on PyPI, so it is mounted and named by path, and uv
-    # resolves it with pytest against the project's dependencies while the
+    # dagger-pytest-otel is not on PyPI, so it is mounted and named by path, and
+    # uv resolves it with pytest against the project's dependencies while the
     # environment is built, before any source is mounted.
-    let plugin = if (tool.tracing) { ["/opt/pytest_otel"] } else { [] }
+    let plugin = if (tool.tracing) { ["/opt/dagger_pytest_otel"] } else { [] }
     let packages = ["pytest==" + version(ws)] + plugin
     let ignoreNested = project.nestedProjects(ws).map { nested => "--ignore=" + nested }
 
     project.step(
-      project.env(ws, with: packages, mount: tool.pytestOtel, mountPath: "/opt/pytest_otel"),
+      project.env(ws, with: packages, mount: tool.pytestOtel, mountPath: "/opt/dagger_pytest_otel"),
       project.uvRun(packages) + ["pytest"] + tool.args + ignoreNested + files,
       "pytest",
       nesting: tool.nesting,

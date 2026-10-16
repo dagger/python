@@ -208,7 +208,7 @@ class TelemetryConfig:
     def get_tracer(self) -> trace.Tracer:
         """Get a tracer for pytest instrumentation."""
         self.configure()
-        return trace.get_tracer("io.dagger.pytest", __import__("pytest_otel").__version__)
+        return trace.get_tracer("io.dagger.pytest", __import__("dagger_pytest_otel").__version__)
 
     def get_logger(self) -> sdklogs.Logger:
         """Get a logger for pytest instrumentation."""

@@ -40,7 +40,7 @@ def reports(pytester: pytest.Pytester) -> List[TestReport]:
     """Real reports from a real run of the skips above."""
     pytester.makepyfile(test_skips=SKIP_SOURCE)
     # Disable this plugin for the inner run: it is the subject, not the harness.
-    recorder = pytester.inline_run("-p", "no:pytest_otel", "-p", "no:cacheprovider")
+    recorder = pytester.inline_run("-p", "no:dagger_pytest_otel", "-p", "no:cacheprovider")
     return recorder.getreports("pytest_runtest_logreport")
 
 
@@ -56,7 +56,7 @@ class TestSkipReasonExtraction:
     """The reason is read out of what pytest actually reports."""
 
     def test_marker_skip_carries_its_reason(self, reports):
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
         reason = plugin._skip_reason(report_for(reports, "test_marked"))
 
@@ -64,7 +64,7 @@ class TestSkipReasonExtraction:
         assert "needs a database" in reason
 
     def test_called_skip_carries_its_reason(self, reports):
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
         reason = plugin._skip_reason(report_for(reports, "test_called"))
 
@@ -72,7 +72,7 @@ class TestSkipReasonExtraction:
         assert "no credentials" in reason
 
     def test_xfail_carries_its_reason(self, reports):
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
         reason = plugin._skip_reason(report_for(reports, "test_expected_failure"))
 
@@ -107,13 +107,13 @@ class TestSkipReasonOnSpan:
         provider = TracerProvider()
         provider.add_span_processor(SimpleSpanProcessor(exporter))
         monkeypatch.setattr(
-            "pytest_otel.tracer.get_tracer",
+            "dagger_pytest_otel.tracer.get_tracer",
             lambda: provider.get_tracer("test"),
         )
         return exporter
 
     def test_span_records_the_skip_reason(self, exporter, reports):
-        from pytest_otel import plugin, tracer
+        from dagger_pytest_otel import plugin, tracer
 
         item = _ItemStub("test_skips.py::test_marked")
         reason = plugin._skip_reason(report_for(reports, "test_marked"))
@@ -128,7 +128,7 @@ class TestSkipReasonOnSpan:
         assert "needs a database" in attributes["test.case.result.reason"]
 
     def test_a_passing_test_records_no_reason(self, exporter):
-        from pytest_otel import tracer
+        from dagger_pytest_otel import tracer
 
         item = _ItemStub("test_skips.py::test_plain")
 
@@ -144,10 +144,10 @@ class TestSkipReasonAsOutput:
     """The reason is emitted as output, which is what the Tests tab renders."""
 
     def test_a_skip_emits_its_reason(self, monkeypatch, reports):
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
-        import pytest_otel.logging_handler as logging_handler
-        from pytest_otel import tracer
+        import dagger_pytest_otel.logging_handler as logging_handler
+        from dagger_pytest_otel import tracer
 
         emitted = []
         monkeypatch.setattr(
@@ -163,10 +163,10 @@ class TestSkipReasonAsOutput:
         assert any("needs a database" in text for text in emitted)
 
     def test_a_passing_test_emits_no_reason(self, monkeypatch, reports):
-        from pytest_otel import plugin
+        from dagger_pytest_otel import plugin
 
-        import pytest_otel.logging_handler as logging_handler
-        from pytest_otel import tracer
+        import dagger_pytest_otel.logging_handler as logging_handler
+        from dagger_pytest_otel import tracer
 
         emitted = []
         monkeypatch.setattr(

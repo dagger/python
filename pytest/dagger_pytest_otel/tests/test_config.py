@@ -8,7 +8,7 @@ class TestTelemetryConfig:
 
     def test_singleton(self):
         """Verify TelemetryConfig is a singleton."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         config1 = TelemetryConfig()
         config2 = TelemetryConfig()
@@ -19,7 +19,7 @@ class TestTelemetryConfig:
         self, monkeypatch, reset_telemetry, mock_otlp_exporters, with_traceparent
     ):
         """Test that configure extracts TRACEPARENT from environment."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         config = TelemetryConfig()
         config._is_configured = False  # Reset state
@@ -35,7 +35,7 @@ class TestTelemetryConfig:
         self, monkeypatch, reset_telemetry, mock_otlp_exporters
     ):
         """Test configuration without TRACEPARENT."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         monkeypatch.delenv("TRACEPARENT", raising=False)
 
@@ -48,7 +48,7 @@ class TestTelemetryConfig:
 
     def test_configure_idempotent(self, reset_telemetry, mock_otlp_exporters):
         """Test that configure is idempotent."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         config = TelemetryConfig()
         config._is_configured = False
@@ -64,7 +64,7 @@ class TestTelemetryConfig:
 
     def test_get_tracer_auto_configures(self, reset_telemetry, mock_otlp_exporters):
         """Test that get_tracer automatically configures telemetry."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         config = TelemetryConfig()
         config._is_configured = False
@@ -76,7 +76,7 @@ class TestTelemetryConfig:
 
     def test_prepare_env_derives_logs_endpoint(self, monkeypatch, reset_telemetry):
         """Test logs endpoint is derived from a trace-specific endpoint."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_ENDPOINT", raising=False)
         monkeypatch.delenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", raising=False)
@@ -97,7 +97,7 @@ class TestTelemetryConfig:
 
     def test_prepare_env_preserves_generic_endpoint(self, monkeypatch, reset_telemetry):
         """Test generic OTLP endpoint handling is left to exporters."""
-        from pytest_otel.config import TelemetryConfig
+        from dagger_pytest_otel.config import TelemetryConfig
 
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
         monkeypatch.setenv(

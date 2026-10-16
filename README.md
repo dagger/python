@@ -147,7 +147,7 @@ steps:
    `.python-version` and `uv.toml`, and the `pyproject.toml` of each uv
    workspace member or path source it owns. The three tools share this layer.
 2. The tool is resolved against those dependencies: `mypy==…`, `ty==…`, or
-   `pytest==…` with the bundled `pytest_otel` plugin.
+   `pytest==…` with the bundled `dagger-pytest-otel` plugin.
 3. The source is mounted. For pytest, `uv sync --locked` then installs the
    project and its local path dependencies. mypy and ty skip the project
    itself — they read first-party code from the source — and install only its
@@ -359,8 +359,8 @@ A project with no test files is not a key, and its `test` does nothing: bare
 pytest exits 5 on an empty collection, so running it there would fail a project
 whose only fault is having no tests yet.
 
-The bundled `pytest_otel` plugin is resolved with pytest against the project's
-dependencies while the environment is built (see [The Python
+The bundled `dagger-pytest-otel` plugin is resolved with pytest against the
+project's dependencies while the environment is built (see [The Python
 environment](#the-python-environment)), rather than installed over the top of a
 finished one.
 
