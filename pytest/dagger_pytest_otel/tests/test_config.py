@@ -206,6 +206,20 @@ class TestProtocol:
         assert isinstance(_get_otlp_exporter(), OTLPSpanExporter)
         assert "http/json" in caplog.text
 
+    def test_a_traces_protocol_leaves_logs_on_the_generic_one(self, monkeypatch, no_otel_env):
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+        from dagger_pytest_otel.config import TelemetryConfig, _get_otlp_log_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "http://127.0.0.1:4317")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+
+        TelemetryConfig()._prepare_env()
+
+        assert isinstance(_get_otlp_log_exporter(), OTLPLogExporter)
+
     def test_logs_follow_the_logs_protocol(self, monkeypatch, no_otel_env):
         from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 

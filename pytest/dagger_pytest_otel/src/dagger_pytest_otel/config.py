@@ -166,17 +166,19 @@ class TelemetryConfig:
 
     def _prepare_env(self) -> None:
         """Prepare environment for OTLP configuration."""
-        if not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"):
+        logs_endpoint = _log_endpoint(os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+        if (
+            logs_endpoint
+            and not os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+            and "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" not in os.environ
+        ):
+            os.environ["OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"] = logs_endpoint
+            # Logs then go where traces go, so only then do they take the traces
+            # protocol; otherwise it would override the generic one for logs.
             _set_env_if_unset(
-                "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
-                _log_endpoint(os.environ.get("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")),
+                "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+                os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"),
             )
-
-        _set_env_if_unset(
-            "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
-            os.environ.get("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL")
-            or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL"),
-        )
 
         # Auto-configure insecure flag for http:// endpoints
         endpoint_vars = [
