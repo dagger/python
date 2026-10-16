@@ -365,8 +365,9 @@ type PytestProject {
   let testExec(ws: Workspace!, files: [String!]!): Container! {
     let project = tool.lib.at(path)
 
-    # dagger-pytest-otel is not on PyPI, so it is mounted and named by path, and
-    # uv resolves it with pytest against the project's dependencies while the
+    # dagger-pytest-otel is mounted and named by path rather than fetched from
+    # PyPI, so a module version always runs the plugin source it ships with. uv
+    # resolves it with pytest against the project's dependencies while the
     # environment is built, before any source is mounted.
     let plugin = if (tool.tracing) { ["/opt/dagger_pytest_otel"] } else { [] }
     let packages = ["pytest==" + version(ws)] + plugin

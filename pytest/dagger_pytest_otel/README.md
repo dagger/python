@@ -28,6 +28,8 @@ Once installed, the plugin is automatically enabled. No code changes are require
 
 When running tests through Dagger, the `TRACEPARENT` environment variable is automatically set, and test spans will appear in the Dagger TUI and Dagger Cloud.
 
+The [pytest module](https://github.com/dagger/python/tree/main/pytest) bundles this plugin. A module that builds its own test container installs it:
+
 ```python
 # In your Dagger module
 @function
@@ -83,9 +85,8 @@ also forwarded as OpenTelemetry logs and mapped to stdout or stderr by severity.
 ## Development
 
 ```bash
-cd sdk/python/pytest_otel
-pip install -e ".[dev]"
-pytest
+cd pytest/dagger_pytest_otel
+uv run pytest
 ```
 
 ## License
