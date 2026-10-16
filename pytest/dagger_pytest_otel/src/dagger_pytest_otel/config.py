@@ -61,7 +61,7 @@ def _protocol(endpoint: str, signal: str) -> str:
 
 _GRPC_MISSING = (
     "OTLP over gRPC needs the opentelemetry-exporter-otlp-proto-grpc package. "
-    "Install it, or use an http:// endpoint with OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf. "
+    "Install it, or use an http:// endpoint with %s=http/protobuf. "
     "%s will not be exported."
 )
 _UNSUPPORTED = "OTLP protocol %r is not supported, sending http/protobuf instead."
@@ -82,7 +82,7 @@ def _get_otlp_exporter() -> Optional[SpanExporter]:
                 OTLPSpanExporter as GrpcSpanExporter,
             )
         except ImportError:
-            logger.warning(_GRPC_MISSING, "Spans")
+            logger.warning(_GRPC_MISSING, "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "Spans")
             return None
         return GrpcSpanExporter()
 
@@ -108,7 +108,7 @@ def _get_otlp_log_exporter():
                 OTLPLogExporter as GrpcLogExporter,
             )
         except ImportError:
-            logger.warning(_GRPC_MISSING, "Logs")
+            logger.warning(_GRPC_MISSING, "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "Logs")
             return None
         return GrpcLogExporter()
 

@@ -57,9 +57,11 @@ pytest
 
 The plugin sends OTLP over HTTP to an `http://` or `https://` endpoint, and over
 gRPC to an endpoint without a scheme. `OTEL_EXPORTER_OTLP_PROTOCOL` (`grpc` or
-`http/protobuf`) overrides that choice; any other value sends `http/protobuf`
-with a warning. gRPC needs the `opentelemetry-exporter-otlp-proto-grpc` package;
-without it, the plugin warns and exports nothing.
+`http/protobuf`) overrides that choice, and `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL`
+or `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` overrides it for one signal; any other
+value sends `http/protobuf` with a warning. gRPC needs the
+`opentelemetry-exporter-otlp-proto-grpc` package; without it, the plugin warns
+and exports nothing.
 
 ### Disabling
 

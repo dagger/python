@@ -193,7 +193,8 @@ class TestProtocol:
         assert _get_otlp_exporter() is None
         assert _get_otlp_log_exporter() is None
         assert "opentelemetry-exporter-otlp-proto-grpc" in caplog.text
-        assert "http/protobuf" in caplog.text
+        assert "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL=http/protobuf" in caplog.text
+        assert "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/protobuf" in caplog.text
 
     def test_an_unsupported_protocol_falls_back_to_http(self, monkeypatch, no_otel_env, caplog):
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
