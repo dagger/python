@@ -55,6 +55,12 @@ export TRACEPARENT="00-abc123...-def456...-01"  # Optional parent trace
 pytest
 ```
 
+The plugin sends OTLP over HTTP to an `http://` or `https://` endpoint, and over
+gRPC to an endpoint without a scheme. `OTEL_EXPORTER_OTLP_PROTOCOL` (`grpc` or
+`http/protobuf`) overrides that choice; any other value sends `http/protobuf`
+with a warning. gRPC needs the `opentelemetry-exporter-otlp-proto-grpc` package;
+without it, the plugin warns and exports nothing.
+
 ### Disabling
 
 To disable instrumentation:

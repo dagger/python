@@ -50,6 +50,23 @@ def _resource() -> Resource:
     )
 
 
+def _protocol(endpoint: str, signal: str) -> str:
+    """The OTLP protocol for a signal: the environment's choice, else the endpoint's scheme."""
+    return (
+        os.environ.get(f"OTEL_EXPORTER_OTLP_{signal}_PROTOCOL")
+        or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+        or ("http/protobuf" if endpoint.startswith(("http://", "https://")) else "grpc")
+    )
+
+
+_GRPC_MISSING = (
+    "OTLP over gRPC needs the opentelemetry-exporter-otlp-proto-grpc package. "
+    "Install it, or use an http:// endpoint with OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf. "
+    "%s will not be exported."
+)
+_UNSUPPORTED = "OTLP protocol %r is not supported, sending http/protobuf instead."
+
+
 def _get_otlp_exporter() -> Optional[SpanExporter]:
     """Get OTLP span exporter if configured."""
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT") or os.environ.get(
@@ -58,23 +75,22 @@ def _get_otlp_exporter() -> Optional[SpanExporter]:
     if not endpoint:
         return None
 
-    try:
-        # Try gRPC first, fall back to HTTP
-        if endpoint.startswith("http://") or endpoint.startswith("https://"):
-            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
-                OTLPSpanExporter,
-            )
-
-            return OTLPSpanExporter()
-        else:
+    protocol = _protocol(endpoint, "TRACES")
+    if protocol == "grpc":
+        try:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                OTLPSpanExporter,
+                OTLPSpanExporter as GrpcSpanExporter,
             )
+        except ImportError:
+            logger.warning(_GRPC_MISSING, "Spans")
+            return None
+        return GrpcSpanExporter()
 
-            return OTLPSpanExporter()
-    except ImportError:
-        logger.warning("OTLP exporter not available, spans will not be exported")
-        return None
+    if protocol != "http/protobuf":
+        logger.warning(_UNSUPPORTED, protocol)
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+    return OTLPSpanExporter()
 
 
 def _get_otlp_log_exporter():
@@ -85,22 +101,22 @@ def _get_otlp_log_exporter():
     if not endpoint:
         return None
 
-    try:
-        if endpoint.startswith("http://") or endpoint.startswith("https://"):
-            from opentelemetry.exporter.otlp.proto.http._log_exporter import (
-                OTLPLogExporter,
-            )
-
-            return OTLPLogExporter()
-        else:
+    protocol = _protocol(endpoint, "LOGS")
+    if protocol == "grpc":
+        try:
             from opentelemetry.exporter.otlp.proto.grpc._log_exporter import (
-                OTLPLogExporter,
+                OTLPLogExporter as GrpcLogExporter,
             )
+        except ImportError:
+            logger.warning(_GRPC_MISSING, "Logs")
+            return None
+        return GrpcLogExporter()
 
-            return OTLPLogExporter()
-    except ImportError:
-        logger.warning("OTLP log exporter not available, logs will not be exported")
-        return None
+    if protocol != "http/protobuf":
+        logger.warning(_UNSUPPORTED, protocol)
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+    return OTLPLogExporter()
 
 
 class TelemetryConfig:

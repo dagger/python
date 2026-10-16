@@ -151,3 +151,67 @@ class TestServiceName:
 
         assert config._tracer_provider.resource.attributes["service.name"] == "pytest"
         assert config._logger_provider.resource.attributes["service.name"] == "pytest"
+
+
+class TestProtocol:
+    """OTEL_EXPORTER_OTLP_*_PROTOCOL chooses the transport, and a missing one says so."""
+
+    def test_an_http_endpoint_uses_http(self, monkeypatch, no_otel_env):
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+        from dagger_pytest_otel.config import _get_otlp_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+
+        assert isinstance(_get_otlp_exporter(), OTLPSpanExporter)
+
+    def test_the_protocol_variable_wins_over_the_scheme(self, monkeypatch, no_otel_env, caplog):
+        from dagger_pytest_otel.config import _get_otlp_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+
+        assert _get_otlp_exporter() is None
+        assert "opentelemetry-exporter-otlp-proto-grpc" in caplog.text
+
+    def test_the_signal_protocol_wins_over_the_generic_one(self, monkeypatch, no_otel_env):
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+        from dagger_pytest_otel.config import _get_otlp_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "http/protobuf")
+
+        assert isinstance(_get_otlp_exporter(), OTLPSpanExporter)
+
+    def test_a_missing_grpc_exporter_says_how_to_fix_it(self, monkeypatch, no_otel_env, caplog):
+        from dagger_pytest_otel.config import _get_otlp_exporter, _get_otlp_log_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
+
+        assert _get_otlp_exporter() is None
+        assert _get_otlp_log_exporter() is None
+        assert "opentelemetry-exporter-otlp-proto-grpc" in caplog.text
+        assert "http/protobuf" in caplog.text
+
+    def test_an_unsupported_protocol_falls_back_to_http(self, monkeypatch, no_otel_env, caplog):
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+        from dagger_pytest_otel.config import _get_otlp_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4318")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+
+        assert isinstance(_get_otlp_exporter(), OTLPSpanExporter)
+        assert "http/json" in caplog.text
+
+    def test_logs_follow_the_logs_protocol(self, monkeypatch, no_otel_env):
+        from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+
+        from dagger_pytest_otel.config import _get_otlp_log_exporter
+
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4318")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "http/protobuf")
+
+        assert isinstance(_get_otlp_log_exporter(), OTLPLogExporter)
