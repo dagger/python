@@ -569,18 +569,23 @@ to PyPI as `dagger-pytest-otel`. Its own module runs its tests and builds and
 checks its wheel and sdist:
 
 ```sh
-dagger check -m .dagger/modules/dagger-pytest-otel
+dagger check --dagger-pytest-otel
 ```
 
 To release it:
 
-1. Set the version in `pytest/dagger_pytest_otel/pyproject.toml`, for example
-   with `uv version --bump minor`, and merge the change.
-2. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
+1. Bump the version, which updates `pyproject.toml` and `uv.lock`:
 
-The tag runs `.github/workflows/publish-dagger-pytest-otel.yml`, which builds
-and checks the wheel and sdist with this module and uploads them with PyPI
-Trusted Publishing.
+   ```sh
+   uv version --project pytest/dagger_pytest_otel --bump minor --no-sync
+   ```
+
+2. Commit both files and merge the change.
+3. Tag the merged commit `dagger-pytest-otel/v<version>` and push the tag.
+
+The tag runs `.github/workflows/publish-dagger-pytest-otel.yml`, which runs
+this module's checks, builds the wheel and sdist with it, and uploads them with
+PyPI Trusted Publishing.
 
 To publish without the workflow, use a PyPI API token:
 
