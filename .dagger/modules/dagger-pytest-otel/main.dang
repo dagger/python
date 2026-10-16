@@ -51,7 +51,7 @@ type DaggerPytestOtel {
   }
 
   """
-  Upload the wheel and sdist to PyPI.
+  Test the plugin, then upload the wheel and sdist to PyPI.
   """
   publish(
     ws: Workspace!,
@@ -65,6 +65,7 @@ type DaggerPytestOtel {
     """
     url: String = null,
   ): Void {
+    test(ws)
     let release = lib.base
       .withWorkdir("/release")
       .withDirectory("dist", dist(ws))

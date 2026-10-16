@@ -22,7 +22,13 @@ jobs:
             echo "refusing to publish: tag $GITHUB_REF_NAME != dagger-pytest-otel/v$version" >&2
             exit 1
           fi
-      - name: Build and check
+      - name: Test and check
+        uses: dagger/dagger-for-github@v8.4.1
+        with:
+          version: "1.0.0-beta.18"
+          verb: check
+          args: --dagger-pytest-otel
+      - name: Build
         uses: dagger/dagger-for-github@v8.4.1
         with:
           version: "1.0.0-beta.18"
