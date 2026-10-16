@@ -591,7 +591,10 @@ release matches the request.
 
 The tag runs `.github/workflows/publish-dagger-pytest-otel.yml`, which runs
 this module's checks and then its `publish` function, with the PyPI API token
-stored as the `DAGGER_PYTEST_OTEL_PYPI_TOKEN` secret of the `pypi` environment.
+stored as the `DAGGER_PYTEST_OTEL_PYPI_TOKEN` repository secret. Any workflow in
+this repository can read that secret, so scope the token to the
+`dagger-pytest-otel` project once it exists, and protect `dagger-pytest-otel/v*`
+tags with a tag ruleset so only trusted people can push a release.
 
 To publish without the workflow, pass a PyPI API token yourself:
 
