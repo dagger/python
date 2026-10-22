@@ -1,0 +1,269 @@
+pub description = "Static type checking for Python projects, powered by Pyrefly"
+
+"""
+Pyrefly over every Python project in a workspace.
+
+Pyrefly is Meta's checker. It runs inside the project's environment on
+purpose. Without the installed packages it cannot resolve third-party imports,
+and an unresolved import is reported as an error that is not real.
+
+The module adds no preset, so a project gets the one `pyrefly check` would
+give it locally. One with no Pyrefly config of its own gets its mypy or
+Pyright config migrated, or else Pyrefly's `basic` preset, which reports only
+high-confidence errors such as unresolved imports. Set a preset in the
+project's config, or pass one in `args`.
+
+https://dagger.io
+https://pyrefly.org
+"""
+type Pyrefly {
+  """
+  Files whose presence makes a directory a project Pyrefly should check.
+  """
+  let markers: [String!]! = ["pyproject.toml"]
+
+  """
+  Python version used for the default base image. Null when a custom base is set.
+  """
+  version: String {
+    lib.version
+  }
+
+  """
+  Project roots to check ("!" excludes; see the `scope` constructor argument).
+  """
+  scope: [String!]! = ["**"]
+
+  """
+  Pyrefly version used for a project that pins none of its own.
+
+  Pinned rather than floating: `uv run --with pyrefly` resolves to whichever
+  Pyrefly is newest on the day it runs, so a check starts failing on a day
+  nobody touched any code.
+  """
+  defaultVersion: String! = "1.4.0"
+
+  """
+  Extra arguments forwarded to every Pyrefly invocation, e.g. ["--preset", "strict"].
+  """
+  args: [String!]! = []
+
+  let pythonVersion: String
+  let base: Container
+
+  new(
+    """
+    Python version used for the default base image. Mutually exclusive with base.
+    """
+    version: String = null,
+    """
+    Base image for every Pyrefly container. Expected to provide a Python
+    interpreter and uv on PATH. Mutually exclusive with version.
+    """
+    base: Container = null,
+    """
+    Project roots to check. A bare pattern selects, a "!"-prefixed pattern
+    excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
+    checks everything but docs.
+    """
+    scope: [String!]! = ["**"],
+    """
+    Pyrefly version used for a project that pins none of its own.
+    """
+    defaultVersion: String! = "1.4.0",
+    """
+    Extra arguments forwarded to every Pyrefly invocation.
+    """
+    args: [String!]! = [],
+  ) {
+    self.pythonVersion = version
+    self.base = base
+    self.scope = scope
+    self.defaultVersion = defaultVersion
+    self.args = args
+    self
+  }
+
+  let lib: Pyproject! {
+    pyproject(markers: markers, version: pythonVersion, base: base)
+  }
+
+  """
+  Python projects at or below the working directory, plus the one enclosing
+  it, that hold Python source of their own, keyed by project root.
+  """
+  projects(ws: Workspace!, includeSkipped: Boolean! = true): PyreflyProjects! {
+    PyreflyProjects(
+      paths: lib
+        .rootsOwning(ws, ["*.py"])
+        .map { root => pyreflyProject(root) }.{{path, skip}}
+        .filter { project => includeSkipped or project.skip == false }
+        .map { project => project.path },
+      tool: self,
+    )
+  }
+
+  """
+  The Pyrefly project containing a workspace path.
+  """
+  project(ws: Workspace!, path: String!, findUp: Boolean! = true): PyreflyProject! {
+    pyreflyProject(lib.project(ws, path, findUp: findUp).path)
+  }
+
+  let pyreflyProject(root: String!): PyreflyProject! {
+    PyreflyProject(path: root, tool: self)
+  }
+
+  """
+  The Pyrefly version used for a project: what it pins, else the default.
+  """
+  versionFor(ws: Workspace!, path: String!): String! {
+    lib.project(ws, path).toolVersion(ws, "pyrefly") ?? defaultVersion
+  }
+}
+
+# Keep all Dang types in one source file until Dagger can convert Workspace
+# arguments for installed multi-file Dang modules. See dagger/dagger#13476.
+
+"""
+Python projects in a workspace, keyed by project root.
+"""
+type PyreflyProjects @collection {
+  """
+  Project root paths.
+  """
+  paths: [String!]! @keys
+
+  let tool: Pyrefly!
+
+  """
+  The Pyrefly project rooted at path.
+  """
+  project(path: String!): PyreflyProject! @get {
+    tool.pyreflyProject(path)
+  }
+
+  """
+  Type check the selected projects with Pyrefly.
+  """
+  typeCheck(ws: Workspace!): Void @check {
+    # A selection over a list evaluates its elements concurrently, so every
+    # project is checked in parallel and every failure is reported.
+    let failures = paths.map { p => project(p) }.{{path, failure: typeCheckFailure(ws)}}
+      .filter { result => result.failure != null }
+    if (failures.length > 0) {
+      raise "pyrefly type check failed:\n" + failures.map { result =>
+        "- " + result.path + ": " + (result.failure ?? "")
+      }.join("\n")
+    }
+    null
+  }
+}
+
+"""
+A Python project rooted at a workspace-relative path.
+"""
+type PyreflyProject {
+  """
+  Project root, relative to the workspace.
+  """
+  path: String!
+
+  let tool: Pyrefly!
+
+  """
+  Whether this project is outside the configured scope.
+  """
+  skip: Boolean! {
+    tool.lib.at(path).selected(tool.scope) == false
+  }
+
+  """
+  Whether this project holds Python source of its own, rather than only in a
+  project nested inside it.
+  """
+  hasSources(ws: Workspace!): Boolean! {
+    tool.lib.at(path).hasOwnFiles(ws, ["*.py"])
+  }
+
+  """
+  The Pyrefly version this project is checked with: what it pins, else the
+  module default.
+  """
+  version(ws: Workspace!): String! {
+    tool.lib.at(path).toolVersion(ws, "pyrefly") ?? tool.defaultVersion
+  }
+
+  """
+  Type check this project with Pyrefly.
+  """
+  typeCheck(ws: Workspace!): Void @check {
+    let failure = typeCheckFailure(ws)
+    if (failure != null) {
+      raise "pyrefly type check failed:\n- " + path + ": " + failure
+    }
+    null
+  }
+
+  """
+  Error message from type checking this project, or null when it passes, is
+  outside the configured scope, or holds no Python source of its own.
+  """
+  let typeCheckFailure(ws: Workspace!): String {
+    if (skip or hasSources(ws) == false) {
+      null
+    } else {
+      { typeCheckExec(ws).sync; null } rescue {
+        err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
+          old: "reduce function: ",
+          new: "",
+        )
+      }
+    }
+  }
+
+  let typeCheckExec(ws: Workspace!): Container! {
+    let project = tool.lib.at(path)
+    let packages = ["pyrefly==" + version(ws)]
+    # A command-line --project-excludes replaces the configured list rather
+    # than adding to it, so it is passed only when the project configures none.
+    let excludes = if (configuresExcludes(ws)) { [] } else {
+      project.excludeNestedFlags(ws, "--project-excludes", regex: false)
+    }
+    # The environment comes from the library, so the dependency layer
+    # underneath is the same one pytest and the other checkers get.
+    # The project itself is not installed: the checker reads first-party code
+    # from the source, so it needs no build backend or compiler.
+    project.step(
+      project.env(ws, with: packages, installProject: false),
+      project.uvRun(packages) + ["pyrefly", "check"] + tool.args + excludes,
+      "pyrefly",
+    )
+  }
+
+  """
+  Whether this project's Pyrefly config sets `project-excludes`. Pyrefly reads
+  the first of pyrefly.toml, .pyrefly.toml (both at the top level) and
+  pyproject.toml ([tool.pyrefly]) that it finds, and so does this. It also
+  accepts the key spelled `project_excludes`.
+  """
+  configuresExcludes(ws: Workspace!): Boolean! {
+    let project = tool.lib.at(path)
+    let keys = ["project-excludes", "project_excludes"]
+    let pyreflyToml = if (project.hasFile(ws, "pyrefly.toml")) { "pyrefly.toml" } else { ".pyrefly.toml" }
+    if (project.hasFile(ws, pyreflyToml)) {
+      project
+        .fileContents(ws, pyreflyToml)
+        .split("\n")
+        .map { line => line.trimSpace }
+        .takeWhile { line => line.hasPrefix("[") == false }
+        .any { line =>
+          keys.any { key => line.hasPrefix(key) and line.trimPrefix(key).trimSpace.hasPrefix("=") }
+        }
+    } else if (project.fileContents(ws, "pyproject.toml").contains("[tool.pyrefly]")) {
+      keys.any { key => project.setsKey(ws, "pyproject.toml", "tool.pyrefly", key) }
+    } else {
+      false
+    }
+  }
+}

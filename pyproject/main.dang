@@ -907,11 +907,12 @@ type PythonProject {
   Container with this project's dependencies and the project installed.
 
   This is the one environment the tools that need a Python runtime share. Ask
-  for it with the same extra packages and pytest, mypy and ty all get the same
-  container, so a single `uv sync` serves three checks instead of three.
+  for it with the same extra packages and pytest, mypy, ty and pyrefly all get
+  the same container, so a single `uv sync` serves four checks.
 
-  mypy and ty need it because a checker that cannot see the installed packages
-  cannot resolve third-party imports, and reports errors that are not real.
+  The type checkers need it because a checker that cannot see the installed
+  packages cannot resolve third-party imports, and reports errors that are not
+  real.
 
   Dependencies are installed before any source is mounted (see
   `dependencies`), so editing the source reinstalls only the project itself.
@@ -1173,13 +1174,17 @@ type PythonProject {
   """
   setsKey(ws: Workspace!, relativePath: String!, section: String!, key: String!): Boolean! {
     let contents = fileContents(ws, relativePath)
+    let header = "[" + section + "]"
     if (contents == "") {
       false
     } else {
       contents
         .split("\n")
         .map { line => line.trimSpace }
-        .dropWhile { line => line != "[" + section + "]" }
+        .dropWhile { line =>
+          let rest = line.trimPrefix(header).trimSpace
+          line.hasPrefix(header) == false or (rest != "" and rest.hasPrefix("#") == false)
+        }
         .dropFirst(1)
         .takeWhile { line => line.hasPrefix("[") == false }
         .any { line => line.hasPrefix(key) and line.trimPrefix(key).trimSpace.hasPrefix("=") }
