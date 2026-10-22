@@ -404,6 +404,13 @@ One project rooted at a workspace-relative path.
 """
 type PythonProject {
   """
+  Where the workspace is mounted in every container this builds. The container
+  mirrors the workspace from here, so a workspace-relative path means the same
+  thing inside it as it does on the user's machine.
+  """
+  let mountRoot: String! = "/ws"
+
+  """
   Workspace-relative path of this project root.
   """
   path: String!
@@ -823,7 +830,7 @@ type PythonProject {
   """
   container(ws: Workspace!): Container! {
     baseImage
-      .withWorkdir("/ws")
+      .withWorkdir(mountRoot)
       .withDirectory(".", source(ws))
       .withWorkdir(path)
   }
@@ -885,7 +892,7 @@ type PythonProject {
     mountPath: String! = "/opt/extra",
   ): Container! {
     let inputs = baseImage
-      .withWorkdir("/ws")
+      .withWorkdir(mountRoot)
       .withDirectory(".", installInputs(ws))
       .withWorkdir(path)
     let synced = step(
@@ -930,7 +937,7 @@ type PythonProject {
     installProject: Boolean! = true,
   ): Container! {
     let sourced = dependencies(ws, with: with, mount: mount, mountPath: mountPath)
-      .withWorkdir("/ws")
+      .withWorkdir(mountRoot)
       .withDirectory(".", source(ws))
       .withWorkdir(path)
     if (installProject) {
@@ -977,7 +984,7 @@ type PythonProject {
     # against an engine of whatever version the user is on.
     let nested = if (nesting) {
       ctr
-        .withDirectory("/ws/.git", directory)
+        .withDirectory(mountRoot + "/.git", directory)
         .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
     } else {
       ctr
