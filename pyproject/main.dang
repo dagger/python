@@ -961,7 +961,28 @@ type PythonProject {
     what: String!,
     nesting: Boolean! = false,
   ): Container! {
-    let done = ctr.withExec(args, expect: ReturnType.ANY, experimentalPrivilegedNesting: nesting)
+    # A nested session finds its workspace root by walking up to a .git
+    # directory, and the container mirrors the workspace under /ws, so without
+    # a marker there the session gets an empty workspace and every
+    # workspace-relative API fails -- including the serveModule a generated
+    # module client calls before its first query. The marker only has to
+    # exist, so synthesize an empty one rather than uploading the real git
+    # directory.
+    #
+    # With its own session rather than the one running this module, a module
+    # address resolves against the user's workspace instead of against this
+    # module. Opening one needs a CLI, and the engine mounts a version-matched
+    # one at /dev/.dagger/dagger; name it, because the SDK otherwise downloads
+    # the release its own client was generated against, over the network and
+    # against an engine of whatever version the user is on.
+    let nested = if (nesting) {
+      ctr
+        .withDirectory("/ws/.git", directory)
+        .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
+    } else {
+      ctr
+    }
+    let done = nested.withExec(args, expect: ReturnType.ANY, daggerInDaggerNewSession: nesting)
     let code = done.exitCode
     if (code == 0) {
       done
