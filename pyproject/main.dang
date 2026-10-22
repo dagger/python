@@ -1173,13 +1173,17 @@ type PythonProject {
   """
   setsKey(ws: Workspace!, relativePath: String!, section: String!, key: String!): Boolean! {
     let contents = fileContents(ws, relativePath)
+    let header = "[" + section + "]"
     if (contents == "") {
       false
     } else {
       contents
         .split("\n")
         .map { line => line.trimSpace }
-        .dropWhile { line => line != "[" + section + "]" }
+        .dropWhile { line =>
+          let rest = line.trimPrefix(header).trimSpace
+          line.hasPrefix(header) == false or (rest != "" and rest.hasPrefix("#") == false)
+        }
         .dropFirst(1)
         .takeWhile { line => line.hasPrefix("[") == false }
         .any { line => line.hasPrefix(key) and line.trimPrefix(key).trimSpace.hasPrefix("=") }
