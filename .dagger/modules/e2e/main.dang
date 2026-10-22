@@ -483,6 +483,7 @@ type E2e {
   let nativeFixture: String! = "testdata/project-native"
   let ruffRangeFixture: String! = "testdata/project-ruff-range"
   let ruffRangeOldFixture: String! = "testdata/project-ruff-range-old"
+  let pyreflyExcludesFixture: String! = "testdata/project-pyrefly-excludes"
 
   """
   Fixtures that are broken on purpose, left out so the batch checks
@@ -500,6 +501,8 @@ type E2e {
     "!" + excludedFixture,
     # A path source in it holds a type error, checked with the project.
     "!" + uvWorkspaceFixture,
+    # Its own Pyrefly config keeps out a type error the other checkers see.
+    "!" + pyreflyExcludesFixture,
   ]
 
   let mypyFailure(ws: Workspace!, path: String!): String! {
@@ -508,6 +511,19 @@ type E2e {
 
   let tyFailure(ws: Workspace!, path: String!): String! {
     failureOf(ty(scope: ["**"]).project(ws, path).typeCheck(ws))
+  }
+
+  """
+  Pyrefly under its default preset. A project with no Pyrefly config gets the
+  basic preset, which reports no type mismatch, so a check that must see one
+  asks for the default preset.
+  """
+  let pyreflyDefault: Pyrefly! {
+    pyrefly(scope: ["**"], args: ["--preset", "default"])
+  }
+
+  let pyreflyFailure(ws: Workspace!, path: String!): String! {
+    failureOf(pyreflyDefault.project(ws, path).typeCheck(ws))
   }
 
   """
@@ -559,6 +575,7 @@ type E2e {
     # The child's module is mistyped; the parent must still pass.
     run(mypy.project(ws, nestedFixture).typeCheck(ws))
     run(ty.project(ws, nestedFixture).typeCheck(ws))
+    run(pyreflyDefault.project(ws, nestedFixture).typeCheck(ws))
 
     let childFailure = mypyFailure(ws, nestedChildFixture)
     assert(
@@ -576,6 +593,12 @@ type E2e {
     assert(
       tyMetachar.contains("exit code"),
       "ty over-matched a dotted nested project exclusion: " + tyMetachar,
+    )
+
+    let pyreflyMetachar = pyreflyFailure(ws, metacharFixture)
+    assert(
+      pyreflyMetachar.contains("subXv2/mistyped.py"),
+      "pyrefly over-matched a dotted nested project exclusion: " + pyreflyMetachar,
     )
 
     let nestedFailure = mypyFailure(ws, metacharNestedFixture)
@@ -601,6 +624,53 @@ type E2e {
   }
 
   """
+  Pyrefly reaches the same verdicts as mypy and ty under its default preset,
+  and otherwise checks a project the way the project's own config says.
+  """
+  pyreflyCheck(ws: Workspace!): Void @check {
+    run(pyrefly(scope: healthy).projects(ws).batch.typeCheck(ws))
+
+    let failure = pyreflyFailure(ws, typeFailFixture)
+    assert(
+      failure.contains("exit code"),
+      "pyrefly did not fail on a type error: " + failure,
+    )
+    # With no Pyrefly config, the basic preset applies, as for `pyrefly check`.
+    run(pyrefly.project(ws, typeFailFixture).typeCheck(ws))
+
+    let subset = [passFixture, typeFailFixture, nestedChildFixture]
+    assertReports(
+      failureOf(pyreflyDefault.projects(ws).subset(keys: subset).batch.typeCheck(ws)),
+      [typeFailFixture, nestedChildFixture],
+      [passFixture],
+    )
+
+    # The basic preset still reports an unresolved import, so passing under it
+    # means the imports of path sources resolve in the project's environment.
+    run(pyrefly.project(ws, uvWorkspaceFixture).typeCheck(ws))
+    let workspace = pyreflyFailure(ws, uvWorkspaceFixture)
+    assert(
+      workspace.contains("broken.py"),
+      "a path source's type error was not the project's to report: " + workspace,
+    )
+
+    # The project has a nested project, so a --project-excludes for it would
+    # replace the configured list and check generated/, which is mistyped.
+    let configured = pyrefly.project(ws, pyreflyExcludesFixture)
+    assert(configured.configuresExcludes(ws), "pyrefly missed project-excludes in [tool.pyrefly]")
+    assert(
+      pyrefly.project(ws, pyreflyExcludesFixture + "/nested").configuresExcludes(ws),
+      "pyrefly missed project_excludes in pyrefly.toml",
+    )
+    assert(
+      pyrefly.project(ws, passFixture).configuresExcludes(ws) == false,
+      "pyrefly saw project-excludes in a project that sets none",
+    )
+    run(configured.typeCheck(ws))
+    null
+  }
+
+  """
   A tool runs the version the project pins, and its own default otherwise.
   """
   toolPinCheck(ws: Workspace!): Void @check {
@@ -620,6 +690,10 @@ type E2e {
     assert(
       ty.versionFor(ws, passFixture) == ty.defaultVersion,
       "ty did not fall back to its own default",
+    )
+    assert(
+      pyrefly.versionFor(ws, passFixture) == pyrefly.defaultVersion,
+      "pyrefly did not fall back to its own default",
     )
     assert(
       mypy.project(ws, pinnedFixture).version(ws) == "1.11.2",

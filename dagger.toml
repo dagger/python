@@ -47,7 +47,7 @@ clients = ["./pyproject"]
 [sdks.dang.scopes.".dagger/modules/e2e"]
 is-module = true
 name = "e2e"
-clients = ["./pyproject", "./uv", "./mypy", "./ty", "./ruff", "./pytest"]
+clients = ["./pyproject", "./uv", "./mypy", "./ty", "./pyrefly", "./ruff", "./pytest"]
 
 [sdks.dang.scopes.".dagger/modules/dagger-pytest-otel"]
 is-module = true

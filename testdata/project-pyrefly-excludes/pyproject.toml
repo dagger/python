@@ -1,0 +1,9 @@
+[project]
+name = "project-pyrefly-excludes"
+version = "0.1.0"
+requires-python = ">=3.11"
+
+# A command-line --project-excludes for the nested project would replace this
+# list, and generated/ would be checked.
+[tool.pyrefly] # a comment here still opens the section
+project-excludes = ["generated", "nested"]

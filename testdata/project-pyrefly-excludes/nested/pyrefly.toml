@@ -1,0 +1,2 @@
+# The snake_case spelling Pyrefly also accepts.
+project_excludes = ["scratch"]
