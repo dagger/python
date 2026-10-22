@@ -29,6 +29,11 @@ is-module = true
 name = "ty"
 clients = ["./pyproject"]
 
+[sdks.dang.scopes."pyrefly"]
+is-module = true
+name = "pyrefly"
+clients = ["./pyproject"]
+
 [sdks.dang.scopes."ruff"]
 is-module = true
 name = "ruff"
