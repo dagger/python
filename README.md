@@ -373,6 +373,10 @@ to Dagger, not to the host. Turn it off to run test code you do not trust:
 nesting = false
 ```
 
+Such a suite gets a session of its own rather than the one running pytest, in
+a container that mirrors the workspace, so a generated module client serves
+the module its address names instead of looking for it inside this module.
+
 ### `uv`
 
 | Function   | Description                                              |
