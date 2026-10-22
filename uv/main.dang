@@ -48,6 +48,8 @@ type Uv {
 
   let pythonVersion: String
   let base: Container
+  let gitToken: Secret
+  let gitHost: String!
 
   new(
     """
@@ -59,6 +61,15 @@ type Uv {
     and uv on PATH. Mutually exclusive with version.
     """
     base: Container = null,
+    """
+    HTTPS token git presents to gitHost, for a dependency sourced from a
+    private git repository, such as a GitHub App installation token.
+    """
+    gitToken: Secret = null,
+    """
+    Host gitToken is presented to, and to no other.
+    """
+    gitHost: String! = "github.com",
     """
     Project roots to lock. A bare pattern selects, a "!"-prefixed pattern
     excludes, and an exclude always wins whatever the order, so ["**", "!docs"]
@@ -77,6 +88,8 @@ type Uv {
   ) {
     self.pythonVersion = version
     self.base = base
+    self.gitToken = gitToken
+    self.gitHost = gitHost
     self.lock = lock
     self.audit = audit
     self.auditArgs = auditArgs
@@ -84,7 +97,7 @@ type Uv {
   }
 
   let lib: Pyproject! {
-    pyproject(markers: markers, version: pythonVersion, base: base)
+    pyproject(markers: markers, version: pythonVersion, base: base, gitToken: gitToken, gitHost: gitHost)
   }
 
   """

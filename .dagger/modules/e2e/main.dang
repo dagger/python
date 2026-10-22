@@ -924,6 +924,37 @@ type E2e {
   }
 
   """
+  A git token reaches git's credential prompt for its own host only, and never
+  lands in the container's plain environment.
+  """
+  gitTokenCheck(ws: Workspace!): Void @check {
+    let token = setSecret(name: "e2e-git-token", plaintext: "e2e-not-a-real-token")
+    let base = pyproject(markers: ["pyproject.toml"], gitToken: token).base
+    let ask = `| GIT_TERMINAL_PROMPT=0 git credential fill`
+    # Compared in the shell: stdout would come back with the secret scrubbed.
+    base
+      .withExec([
+        "sh",
+        "-c",
+        `test "$(printf 'protocol=https\nhost=github.com\n\n' ` + ask + ` | grep '^password=')" = "password=$PYPROJECT_GIT_TOKEN"`,
+      ])
+      .sync
+    let elsewhere = { base.withExec(["sh", "-c", `printf 'protocol=https\nhost=gitlab.com\n\n' ` + ask]).stdout } rescue {
+      err: Error => "refused"
+    }
+    assert(elsewhere == "refused", "the git token was offered to another host")
+    assert(
+      base.envVariable("PYPROJECT_GIT_TOKEN") == null,
+      "the git token is a plain environment variable",
+    )
+    assert(
+      pyproject(markers: ["pyproject.toml"]).base.envVariable("GIT_CONFIG_COUNT") == null,
+      "a base with no git token carries a credential helper",
+    )
+    null
+  }
+
+  """
   mypy checks what the project's config names with `files`, rather than every
   file below the project root, and both checkers take extra arguments.
   """
