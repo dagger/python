@@ -16,6 +16,7 @@ github.com/dagger/python
 ├── uv/           lock, build, audit
 ├── mypy/         type check
 ├── ty/           type check
+├── pyrefly/      type check
 └── .dagger/      one end-to-end suite for all of them
 ```
 
@@ -33,6 +34,7 @@ dagger install github.com/dagger/python/pytest  # tests
 dagger install github.com/dagger/python/uv      # lock, build, audit
 dagger install github.com/dagger/python/mypy    # type check
 dagger install github.com/dagger/python/ty      # type check, Astral's checker
+dagger install github.com/dagger/python/pyrefly # type check, Meta's checker
 ```
 
 `pyproject` is a library, not a tool. You depend on it when you write a module;
@@ -46,26 +48,27 @@ library; see "Relationship to the standalone modules" below.
 
 Each tool module's `projects` is a Dagger collection keyed by project root, so
 it adds a dimension — `ruff-project`, `pytest-project`, `mypy-project`,
-`ty-project`, `uv-project` — that checks and generators select on. pytest adds a
-second one under it, `pytest-test-file`, keyed by test file. For a repository
-with projects `app` and `libs/core`:
+`ty-project`, `pyrefly-project`, `uv-project` — that checks and generators
+select on. pytest adds a second one under it, `pytest-test-file`, keyed by test
+file. For a repository with projects `app` and `libs/core`:
 
 ```console
 $ dagger list ruff-projects -a
 $ dagger list pytest-test-files --pytest-project=app -a
 $ dagger check --ruff --check lint --ruff-project=app
-$ dagger check --check type-check              # mypy and ty together
+$ dagger check --check type-check              # mypy, ty and pyrefly together
 $ dagger check --pytest --pytest-project=app --pytest-test-file=tests/test_api.py
 $ dagger generate --ruff --ruff-project=app     # ruff format
 $ dagger check -l --all --ruff -f=cli           # one line per project, as flags
 ```
 
 `dagger check --help` lists the flags in effect: `--ruff-project`,
-`--pytest-project`, `--pytest-test-file`, `--mypy-project`, `--ty-project` and
-`--uv-project` select keys (`--ruff-projects`, `--pytest-tests` and so on select
-a whole dimension); `--ruff`, `--pytest`, `--mypy`, `--ty` and `--uv` select a
-module; and `--check <name>` selects a check by name across modules: `lint`,
-`test`, `type-check`, `audit`, or `stale` for the generators' staleness checks.
+`--pytest-project`, `--pytest-test-file`, `--mypy-project`, `--ty-project`,
+`--pyrefly-project` and `--uv-project` select keys (`--ruff-projects`,
+`--pytest-tests` and so on select a whole dimension); `--ruff`, `--pytest`,
+`--mypy`, `--ty`, `--pyrefly` and `--uv` select a module; and `--check <name>`
+selects a check by name across modules: `lint`, `test`, `type-check`, `audit`,
+or `stale` for the generators' staleness checks.
 
 `dagger call` cannot step into a collection yet. To call a function on one
 project, use the shell form:
@@ -106,6 +109,7 @@ container or a Python tool. It reads the workspace directly:
 | `ruff`   | holds a `pyproject.toml`, `ruff.toml` or `.ruff.toml`      | one `findRoots` |
 | `mypy`   | holds a non-empty `*.py` file of its own                   | one `findRoots`, one ripgrep search |
 | `ty`     | holds a non-empty `*.py` file of its own                   | one `findRoots`, one ripgrep search |
+| `pyrefly` | holds a non-empty `*.py` file of its own                  | one `findRoots`, one ripgrep search |
 | `pytest` | holds a test file of its own (see below)                   | one `findRoots`, one ripgrep search |
 | `uv`     | holds a `uv.lock`                                         | two `findRoots` |
 
@@ -127,8 +131,8 @@ whole-project run still collects those, because it runs pytest the way the
 project configures it.
 
 On a tree with 40 projects and 16,000 files in their virtualenvs, discovery
-for `dagger check -l --all` with all five modules installed takes 4–8 seconds,
-down from 12–25 seconds when each project walked its own tree.
+for `dagger check -l --all` with ruff, pytest, uv, mypy and ty installed takes
+4–8 seconds, down from 12–25 seconds when each project walked its own tree.
 
 A uv workspace member, or a `path` source in `[tool.uv.sources]`, that sits
 inside the project declaring it is part of that project: it is not a key of
@@ -139,21 +143,21 @@ source outside the declaring project stays a project of its own.
 
 ### The Python environment
 
-mypy, ty and pytest run in the project's own environment, built with uv in
-steps:
+mypy, ty, pyrefly and pytest run in the project's own environment, built with
+uv in steps:
 
 1. `uv sync --locked --no-install-workspace --no-install-local`, with only the
    files uv reads mounted: the project's `pyproject.toml`, `uv.lock`,
    `.python-version` and `uv.toml`, and the `pyproject.toml` of each uv
-   workspace member or path source it owns. The three tools share this layer.
-2. The tool is resolved against those dependencies: `mypy==…`, `ty==…`, or
-   `pytest==…` with the bundled `dagger-pytest-otel` plugin.
+   workspace member or path source it owns. The four tools share this layer.
+2. The tool is resolved against those dependencies: `mypy==…`, `ty==…`,
+   `pyrefly==…`, or `pytest==…` with the bundled `dagger-pytest-otel` plugin.
 3. The source is mounted. For pytest, `uv sync --locked` then installs the
-   project and its local path dependencies. mypy and ty skip the project
-   itself — they read first-party code from the source — and install only its
-   uv workspace members and path sources, when it has any.
+   project and its local path dependencies. mypy, ty and pyrefly skip the
+   project itself — they read first-party code from the source — and install
+   only its uv workspace members and path sources, when it has any.
 
-A source edit leaves steps 1 and 2 cached. For mypy and ty nothing is
+A source edit leaves steps 1 and 2 cached. For the type checkers nothing is
 installed after it, so only the checker runs again, and a project whose build
 needs a compiler or a slow build backend is type checked without one. An edit
 to an unrelated project's `pyproject.toml`, or to the workspace's
@@ -406,7 +410,7 @@ Locking is a `@generate` rather than a pass/fail check, so drift shows up in
 Packaging is neither: an application-only project has no build backend, and
 failing it would be wrong.
 
-### `mypy` and `ty`
+### `mypy`, `ty` and `pyrefly`
 
 | Function      | Description                                                 |
 | ------------- | ----------------------------------------------------------- |
@@ -414,18 +418,18 @@ failing it would be wrong.
 | `project`     | The project containing a workspace path.                    |
 | `version-for` | The tool version used for a project.                        |
 
-| Setting          | Default                   | Meaning                                    |
-| ---------------- | ------------------------- | ------------------------------------------ |
-| `scope`          | `["**"]`                  | Project roots to type check.               |
-| `defaultVersion` | mypy `2.3.1`, ty `0.0.78` | The checker for a project that pins none.  |
-| `args`           | `[]`                      | Extra arguments for every run, e.g. `["--strict"]`. |
-| `version`        | `3.14`                    | Python version of the default base image.  |
-| `base`           | none                      | Base image with Python and uv.             |
+| Setting          | Default                                    | Meaning                                    |
+| ---------------- | ------------------------------------------ | ------------------------------------------ |
+| `scope`          | `["**"]`                                   | Project roots to type check.               |
+| `defaultVersion` | mypy `2.3.1`, ty `0.0.78`, pyrefly `1.4.0` | The checker for a project that pins none.  |
+| `args`           | `[]`                                       | Extra arguments for every run, e.g. mypy's `["--strict"]` or pyrefly's `["--preset", "strict"]`. |
+| `version`        | `3.14`                                     | Python version of the default base image.  |
+| `base`           | none                                       | Base image with Python and uv.             |
 
-On a project: `type-check` (a `@check`), `has-sources`, `version`, `skip`, and
-for mypy `configures-files`. Both modules name the check `type-check`, so
-`dagger check --check type-check` runs them together and `--mypy --check
-type-check` runs one.
+On a project: `type-check` (a `@check`), `has-sources`, `version`, `skip`, for
+mypy `configures-files`, and for pyrefly `configures-excludes`. All three
+modules name the check `type-check`, so `dagger check --check type-check` runs
+them together and `--mypy --check type-check` runs one.
 
 mypy runs as the project configures it. When the project's mypy config names
 its files — `files` in `mypy.ini`, `.mypy.ini`, `[tool.mypy]` in
@@ -434,13 +438,37 @@ runs bare `mypy`, so the config decides what is checked; otherwise it runs
 `mypy .`. ty always runs bare `ty check` and honours `[tool.ty.src]`. Nested
 projects are excluded either way.
 
-Both run inside the project's environment. A checker that cannot see the
+pyrefly always runs bare `pyrefly check`, so the project's own
+`project-includes` and `project-excludes` decide what is checked. The module
+adds no preset, so a project gets the one `pyrefly check` would give it
+locally. A project with no Pyrefly config — no `pyrefly.toml`, `.pyrefly.toml`
+or `[tool.pyrefly]` — gets its mypy or Pyright config migrated when it has
+one, and Pyrefly's `basic` preset otherwise. `basic` reports only
+high-confidence errors such as an unresolved import, and not a mismatched
+type. To check more, set `preset` in the project's Pyrefly config, or pass
+`args: ["--preset", "default"]`, which overrides every project's own preset
+and turns the migration off.
+
+Nested projects are excluded with `--project-excludes`, except in a project
+whose Pyrefly config sets `project-excludes`: the flag would replace that list
+rather than add to it, so such a project lists its nested projects itself.
+`configures-excludes` reads only a `project-excludes` set directly in the
+Pyrefly config. It does not see one inherited through `extends`, read from a
+file that `args` names with `--config`, or migrated from a mypy or Pyright
+config; in a project with nested projects, the flag replaces those. Such a
+project sets `project-excludes` in its own Pyrefly config, or passes
+`--project-excludes` in `args`, which adds to the module's flags. The pyrefly
+version a project pins with `required-version` is read from `[tool.pyrefly]`
+before `pyrefly.toml`, the reverse of Pyrefly's own order, so a project that
+sets it in both keeps the two equal.
+
+All three run inside the project's environment. A checker that cannot see the
 installed packages cannot resolve third-party imports and reports errors that
 are not real, and a false error is worse than no check.
 
-They are two modules rather than one with a setting because they spell the same
-flag in different languages: `mypy --exclude` takes a regular expression and
-`ty --exclude` takes a glob, so a directory named `sdk-v1.2` needs two
+They are separate modules rather than one with a setting because they spell the
+same flag in different languages: `mypy --exclude` takes a regular expression
+and `ty --exclude` takes a glob, so a directory named `sdk-v1.2` needs two
 different escapes.
 
 ### `pyproject`
@@ -521,14 +549,15 @@ The defaults, for a project that pins nothing:
 | ruff | 0.16.5 | `ruff/images/ruff/Dockerfile` |
 | mypy | 2.3.1 | `mypy`, `defaultVersion` |
 | ty | 0.0.78 | `ty`, `defaultVersion` |
+| pyrefly | 1.4.0 | `pyrefly`, `defaultVersion` |
 | pytest | 9.1.1 | `pytest`, `defaultVersion` |
 
 The two in Dockerfiles are there so Dependabot can raise a pull request for
 them. The rest are plain arguments, so a project that wants a different version
 either pins it in its own metadata or sets `defaultVersion`.
 
-**One environment, not three.** pytest, mypy and ty all ask the library for the
-same dependency layer, so one `uv sync` serves three checks.
+**One environment, not four.** pytest, mypy, ty and pyrefly all ask the library
+for the same dependency layer, so one `uv sync` serves four checks.
 
 ## Relationship to the standalone modules
 
