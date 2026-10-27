@@ -987,6 +987,8 @@ type PythonProject {
   project's build backend nor a compiler for a native extension, and a
   source edit rebuilds nothing. Its uv workspace members and path sources are
   still installed, when it has any, since its imports of them resolve there.
+
+  Installing the project must leave the extra tools' dependencies compatible.
   """
   env(
     ws: Workspace!,
@@ -1002,12 +1004,21 @@ type PythonProject {
       .withWorkdir("/ws")
       .withDirectory(".", source(ws))
       .withWorkdir(path)
-    if (installProject) {
+    let local = hasLocalDependencies(ws)
+    let installed = if (installProject) {
       step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--inexact"], "environment")
-    } else if (hasLocalDependencies(ws)) {
+    } else if (local) {
       step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--inexact", "--no-install-project"], "environment")
     } else {
       sourced
+    }
+    if (with.isEmpty == false) {
+      # Missing dependencies are ignored because sync omits packages deliberately;
+      # extras-only conflicts are undetected, and requested-version checks skip URLs/paths.
+      step(installed.withFile("/tmp/check_environment.py", currentModule.source.file("check_environment.py")),
+        [environmentPython, "-I", "-B", "/tmp/check_environment.py"] + with, "environment")
+    } else {
+      installed
     }
   }
 
