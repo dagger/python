@@ -853,14 +853,27 @@ type E2e {
       passFixture + "/pyproject.toml",
       ws.file("/" + passFixture + "/pyproject.toml").contents + "\ndependencies = [\"packaging==25.0\"]\n",
     )
-    project.dependencies(dependencyWs)
+    let bytecodeCheck = "import importlib.util, pathlib, packaging\n" +
+      "pyc = pathlib.Path(importlib.util.cache_from_source(packaging.__file__))\n" +
+      "assert pyc.is_file(), 'dependency bytecode is missing'\n" +
+      "assert int.from_bytes(pyc.read_bytes()[4:8], 'little') == 3, 'bytecode is not checked-hash'\n"
+    [project.dependencies(dependencyWs), project.env(dependencyWs)].each { env =>
+      env
+        .withoutMount("/root/.cache/uv")
+        .withExec([".venv/bin/python", "-I", "-B", "-c", bytecodeCheck])
+        .sync
+    }
+
+    let editedBuild = ws.withNewFile(
+      buildFixture + "/src/project_build/__init__.py",
+      "def packaged() -> str:\n    return 'edited'\n",
+    )
+    lib
+      .project(editedBuild, buildFixture)
+      .env(editedBuild, with: ["packaging==25.0"])
       .withoutMount("/root/.cache/uv")
-      .withExec([".venv/bin/python", "-I", "-c",
-        "import importlib.util, pathlib, packaging\n" +
-          "pyc = pathlib.Path(importlib.util.cache_from_source(packaging.__file__))\n" +
-          "assert pyc.is_file(), 'dependency bytecode is missing'\n" +
-          "assert int.from_bytes(pyc.read_bytes()[4:8], 'little') == 3, 'bytecode is not checked-hash'\n",
-      ])
+      .withExec([".venv/bin/python", "-I", "-B", "-c", bytecodeCheck +
+        "import project_build\nassert project_build.packaged() == 'edited'\n"])
       .sync
 
     # The project itself does not depend on packaging; the extra does.

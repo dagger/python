@@ -991,7 +991,10 @@ type PythonProject {
     mountPath: String! = "/opt/extra",
     installProject: Boolean! = true,
   ): Container! {
+    # uv sync recompiles all site-packages, including unchanged dependencies.
+    # Their bytecode is already cached; project code can compile on import.
     let sourced = dependencies(ws, with: with, mount: mount, mountPath: mountPath)
+      .withEnvVariable("UV_COMPILE_BYTECODE", "0")
       .withWorkdir("/ws")
       .withDirectory(".", source(ws))
       .withWorkdir(path)
