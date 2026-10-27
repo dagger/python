@@ -1568,6 +1568,18 @@ type E2e {
     assert(keys.contains(deepFixture) == false, "a project without test files is a key")
     assert(projects.get(key: passFixture).path == passFixture, "get did not return the project at its key")
 
+    let changed = ws.withNewFile(passFixture + "/tests/test_greeting.py",
+      "raise RuntimeError('previously discovered test executed')\n")
+    let discoveredFailure = {
+      projects.get(key: passFixture).test(changed)
+      "passed"
+    } rescue { err: Error => err.message }
+    assert(
+      discoveredFailure.contains("previously discovered test executed"),
+      "a collection project searched for its tests again: " + discoveredFailure,
+    )
+    pytest.project(changed, passFixture).test(changed)
+
     projects.subset(keys: [passFixture, nestedFixture, skipFixture]).batch.test(ws)
     let failures = {
       projects.subset(keys: [passFixture, testFailFixture, nestedChildFixture]).batch.test(ws)

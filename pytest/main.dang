@@ -331,7 +331,8 @@ type PytestProject {
   """
   let testFailure(ws: Workspace!): String {
     let inputs = checkInputs(ws)
-    if (inputs.skip or inputs.hasSources == false) {
+    let sources = if (discovered == null) { inputs.hasSources } else { hasTests(ws) }
+    if (inputs.skip or sources == false) {
       null
     } else {
       { testExec(ws, [], inputs.version ?? tool.defaultVersion, inputs.nestedProjects).sync; null } rescue {
@@ -391,7 +392,7 @@ type PytestProject {
       ws,
       "pytest",
       scope: tool.scope,
-      sourceGlobs: tool.testGlobs,
+      sourceGlobs: if (discovered == null) { tool.testGlobs } else { [] },
       sourcePattern: tool.testLine,
       excludeFlag: "",
     )
