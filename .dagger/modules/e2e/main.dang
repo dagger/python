@@ -841,6 +841,20 @@ type E2e {
       "the shared environment was rebuilt instead of reused",
     )
 
+    let dependencyWs = ws.withNewFile(
+      passFixture + "/pyproject.toml",
+      ws.file("/" + passFixture + "/pyproject.toml").contents + "\ndependencies = [\"packaging==25.0\"]\n",
+    )
+    project.dependencies(dependencyWs)
+      .withoutMount("/root/.cache/uv")
+      .withExec([".venv/bin/python", "-I", "-c",
+        "import importlib.util, pathlib, packaging\n" +
+          "pyc = pathlib.Path(importlib.util.cache_from_source(packaging.__file__))\n" +
+          "assert pyc.is_file(), 'dependency bytecode is missing'\n" +
+          "assert int.from_bytes(pyc.read_bytes()[4:8], 'little') == 3, 'bytecode is not checked-hash'\n",
+      ])
+      .sync
+
     # The project itself does not depend on packaging; the extra does.
     let bare = {
       project.env(ws).withExec(["uv", "run", "python", "-c", "import packaging"]).sync

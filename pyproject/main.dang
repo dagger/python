@@ -136,6 +136,8 @@ type Pyproject {
       # default hardlink install mode falls back to a copy with a warning.
       .withEnvVariable("UV_LINK_MODE", "copy")
       .withEnvVariable("UV_NO_PROGRESS", "1")
+      .withEnvVariable("UV_COMPILE_BYTECODE", "1")
+      .withEnvVariable("PYC_INVALIDATION_MODE", "CHECKED_HASH")
       .withDirectory("/usr/local/bin", uvBinary, include: ["uv", "uvx"])
   }
 
