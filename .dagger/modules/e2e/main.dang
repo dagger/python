@@ -908,6 +908,13 @@ type E2e {
         failure.contains("environment failed (uv pip install") and failure.contains("packaging"),
         "a tool replaced a constrained dependency: " + failure,
       )
+      pyproject(markers: ["pyproject.toml"], base: lib.base.withEnvVariable("UV_PROJECT_ENVIRONMENT", "/opt/venv"))
+        .project(input, passFixture)
+        .env(input, with: ["packaging==25.0"])
+        .withoutMount("/root/.cache/uv")
+        .withExec(["/opt/venv/bin/python", "-I", "-B", "-c", bytecodeCheck +
+          "import sys\nassert sys.prefix == '/opt/venv'\n"])
+        .sync
     }
 
     # Dependencies install from the files uv reads, before any source is

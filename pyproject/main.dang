@@ -915,6 +915,10 @@ type PythonProject {
     if (hasFile(ws, "uv.lock")) { ["--locked"] } else { [] }
   }
 
+  let environmentPython: String! {
+    (baseImage.envVariable("UV_PROJECT_ENVIRONMENT") ?? ".venv") + "/bin/python"
+  }
+
   """
   Container with this project's dependencies installed, but not the project
   itself or its local path dependencies, from `installInputs` alone.
@@ -950,7 +954,7 @@ type PythonProject {
           ["uv", "export", "--frozen", "--no-hashes", "--no-emit-project",
             "--no-emit-workspace", "--no-emit-local", "--output-file", constraints]
         } else {
-          ["sh", "-c", "uv pip freeze --python .venv/bin/python > " + constraints]
+          ["sh", "-c", "uv pip freeze --python \"$1\" > \"$2\"", "sh", environmentPython, constraints]
         },
         "environment",
       )
@@ -959,7 +963,7 @@ type PythonProject {
       }
       step(
         mounted,
-        ["uv", "pip", "install", "--python", ".venv/bin/python", "--constraint", constraints] + with,
+        ["uv", "pip", "install", "--python", environmentPython, "--constraint", constraints] + with,
         "environment",
       )
     }
