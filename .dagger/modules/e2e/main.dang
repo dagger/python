@@ -869,14 +869,35 @@ type E2e {
 
     let withExtra = project.env(ws, with: ["packaging"])
     withExtra
-      .withExec(["uv", "run"] + project.withFlags(["packaging"])
-        + ["python", "-c", "import packaging"])
+      .withoutMount("/root/.cache/uv")
+      .withExec(project.uvRun(["packaging"])
+        + ["python", "-I", "-c", "import packaging, sys; assert packaging.__file__.startswith(sys.prefix + '/')"])
       .sync
+
+    let lockedWs = dependencyWs.withNewFile(
+      passFixture + "/uv.lock",
+      project.dependencies(dependencyWs).file("uv.lock").contents,
+    )
+    [dependencyWs, lockedWs].each { input =>
+      let failure = {
+        project.dependencies(input, with: ["packaging==24.2"]).sync
+        "built"
+      } rescue { err: Error => err.message }
+      assert(
+        failure.contains("environment failed (uv pip install") and failure.contains("packaging"),
+        "a tool replaced a constrained dependency: " + failure,
+      )
+    }
 
     # Dependencies install from the files uv reads, before any source is
     # mounted, so a source edit leaves that layer cached.
     let edited = ws.withNewFile(passFixture + "/greeting.py", "GREETING = 'edited'\n")
     let editedProject = lib.project(edited, passFixture)
+    assert(
+      project.dependencies(ws, with: ["packaging"]).rootfs.digest
+        == editedProject.dependencies(edited, with: ["packaging"]).rootfs.digest,
+      "a source edit changed the installed tools",
+    )
     assert(
       project.installInputs(ws).glob("**") == editedProject.installInputs(edited).glob("**"),
       "a source edit changed the dependency layer's inputs",

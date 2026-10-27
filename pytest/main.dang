@@ -8,9 +8,9 @@ test run is the same layer mypy and ty get. There is no runner probing and no
 pip path here: this module is uv-based, and a caller who needs something else
 supplies its own base image.
 
-dagger-pytest-otel, the bundled OpenTelemetry plugin, is resolved alongside
-pytest and the project's own dependencies in one uv pass. Installing it over the
-top of a finished environment resolves nothing, so a conflict passes unnoticed.
+dagger-pytest-otel, the bundled OpenTelemetry plugin, is installed with pytest
+under the project's dependency constraints, so a conflict fails while building
+the environment.
 
 https://dagger.io
 https://pytest.org

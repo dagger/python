@@ -875,9 +875,9 @@ type PythonProject {
   itself or its local path dependencies, from `installInputs` alone.
 
   `with` names extra packages the caller needs on top of the project's own.
-  They are resolved against the project's environment here, not installed
-  over the top of a finished one, so a conflict fails here, while building the
-  environment. `mount` is placed at `mountPath` for an extra package named
+  They are installed into its environment under constraints from the lockfile,
+  or the installed dependencies when there is no lock, so a conflict fails
+  while building the environment. `mount` is placed at `mountPath` for an extra package named
   by path, after the dependency sync, so every tool shares that layer.
   """
   dependencies(
@@ -895,13 +895,28 @@ type PythonProject {
       ["uv", "sync"] + syncFlags(ws) + ["--no-install-workspace", "--no-install-local"],
       "environment",
     )
-    let mounted = if (mount == null) { synced } else {
-      synced.withDirectory(mountPath, mount)
-    }
     if (with.isEmpty) {
-      mounted
+      if (mount == null) { synced } else { synced.withDirectory(mountPath, mount) }
     } else {
-      step(mounted, uvRun(with) + ["python", "-c", ""], "environment")
+      let constraints = "/tmp/dagger-python-constraints.txt"
+      let constrained = step(
+        synced,
+        if (hasFile(ws, "uv.lock")) {
+          ["uv", "export", "--frozen", "--no-hashes", "--no-emit-project",
+            "--no-emit-workspace", "--no-emit-local", "--output-file", constraints]
+        } else {
+          ["sh", "-c", "uv pip freeze --python .venv/bin/python > " + constraints]
+        },
+        "environment",
+      )
+      let mounted = if (mount == null) { constrained } else {
+        constrained.withDirectory(mountPath, mount)
+      }
+      step(
+        mounted,
+        ["uv", "pip", "install", "--python", ".venv/bin/python", "--constraint", constraints] + with,
+        "environment",
+      )
     }
   }
 
@@ -936,9 +951,9 @@ type PythonProject {
       .withDirectory(".", source(ws))
       .withWorkdir(path)
     if (installProject) {
-      step(sourced, ["uv", "sync"] + syncFlags(ws), "environment")
+      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--inexact"], "environment")
     } else if (hasLocalDependencies(ws)) {
-      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--no-install-project"], "environment")
+      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--inexact", "--no-install-project"], "environment")
     } else {
       sourced
     }
@@ -946,10 +961,10 @@ type PythonProject {
 
   """
   The start of a `uv run` command for a tool in `env`: no re-sync, and the
-  extra packages `env` already resolved.
+  extra packages `env` already installed.
   """
   uvRun(packages: [String!]!): [String!]! {
-    ["uv", "run", "--no-sync"] + withFlags(packages)
+    ["uv", "run", "--no-sync"]
   }
 
   """
@@ -982,8 +997,7 @@ type PythonProject {
   """
   `--with` flags naming extra packages for a uv invocation.
 
-  A caller runs its own command with the same flags, against the resolution
-  `env` already made and cached.
+  Tools installed by `env` need only `uvRun`.
   """
   withFlags(packages: [String!]!): [String!]! {
     packages.reduce([]) { flags, package => flags + ["--with", package] }
