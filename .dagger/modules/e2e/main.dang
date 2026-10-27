@@ -605,6 +605,14 @@ type E2e {
   """
   toolPinCheck(ws: Workspace!): Void @check {
     assert(
+      lib.at(pinnedFixture).checkInputs(ws, "mypy").version == "1.11.2",
+      "the combined project inputs did not take the locked tool version",
+    )
+    assert(
+      lib.at(passFixture).checkInputs(ws, "mypy").version == null,
+      "the combined project inputs invented a tool version",
+    )
+    assert(
       mypy.versionFor(ws, pinnedFixture) == "1.11.2",
       "mypy did not take the version pinned in uv.lock: "
         + mypy.versionFor(ws, pinnedFixture),
@@ -963,6 +971,20 @@ type E2e {
   file below the project root, and both checkers take extra arguments.
   """
   typeCheckConfigCheck(ws: Workspace!): Void @check {
+    let inputs = lib.at(metacharFixture).checkInputs(ws, "mypy", excludeRegex: true)
+    assert(inputs.hasSources and inputs.skip == false, "the combined inputs lost the project's sources")
+    assert(
+      inputs.excludeNestedFlags == ["--exclude", "^sub\\.v2/"],
+      "the combined inputs did not escape the nested project: " + inputs.excludeNestedFlags.join(" "),
+    )
+    assert(
+      lib.at(deepFixture).checkInputs(ws, "mypy").hasSources == false,
+      "the combined inputs found sources in an empty project",
+    )
+    assert(
+      lib.at(passFixture).checkInputs(ws, "mypy", scope: ["!" + passFixture]).skip,
+      "the combined inputs ignored the project selection",
+    )
     let configured = mypy.project(ws, mypyFilesFixture)
     assert(configured.configuresFiles(ws), "mypy did not see the configured files")
     assert(
@@ -971,6 +993,29 @@ type E2e {
     )
     # scripts/ holds a type error outside the configured files.
     run(configured.typeCheck(ws))
+
+    let hiddenIni = ws.withNewFile(mypyFilesFixture + "/.mypy.ini", "[mypy]\nignore_missing_imports = true\n")
+    assert(
+      mypy.project(hiddenIni, mypyFilesFixture).configuresFiles(hiddenIni) == false,
+      ".mypy.ini did not take precedence over pyproject.toml",
+    )
+    let ini = hiddenIni.withNewFile(mypyFilesFixture + "/mypy.ini", "[mypy]\nfiles = src\n")
+    assert(
+      mypy.project(ini, mypyFilesFixture).configuresFiles(ini),
+      "mypy.ini did not take precedence over .mypy.ini",
+    )
+    let setup = ws
+      .withNewFile(mypyFilesFixture + "/pyproject.toml", "[project]\nname = \"configured\"\nversion = \"0.1.0\"\n")
+      .withNewFile(mypyFilesFixture + "/setup.cfg", "[mypy]\nfiles = src\n")
+    assert(
+      mypy.project(setup, mypyFilesFixture).configuresFiles(setup),
+      "setup.cfg was not read when pyproject.toml had no mypy section",
+    )
+    let emptySection = setup.withNewFile(mypyFilesFixture + "/pyproject.toml", "[tool.mypy]\n")
+    assert(
+      mypy.project(emptySection, mypyFilesFixture).configuresFiles(emptySection) == false,
+      "a mypy section without files fell through to setup.cfg",
+    )
 
     let strict = failureOf(
       mypy(args: ["--strict"]).project(ws, mypyFilesFixture).typeCheck(ws),

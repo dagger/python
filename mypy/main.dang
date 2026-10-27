@@ -93,9 +93,7 @@ type Mypy {
     MypyProjects(
       paths: lib
         .rootsOwning(ws, ["*.py"])
-        .map { root => mypyProject(root) }.{{path, skip}}
-        .filter { project => includeSkipped or project.skip == false }
-        .map { project => project.path },
+        .filter { root => includeSkipped or mypyProject(root).skip == false },
       tool: self,
     )
   }
@@ -207,10 +205,19 @@ type MypyProject {
   outside the configured scope, or holds no Python source of its own.
   """
   let typeCheckFailure(ws: Workspace!): String {
-    if (skip or hasSources(ws) == false) {
+    let inputs = checkInputs(ws, tool.scope)
+    if (inputs.skip or inputs.hasSources == false) {
       null
     } else {
-      { typeCheckExec(ws).sync; null } rescue {
+      {
+        typeCheckExec(
+          ws,
+          inputs.version ?? tool.defaultVersion,
+          filesConfigured(inputs.configKeys.{{exists, hasSection, setsKey}}),
+          inputs.excludeNestedFlags,
+        ).sync
+        null
+      } rescue {
         err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
           old: "reduce function: ",
           new: "",
@@ -219,20 +226,24 @@ type MypyProject {
     }
   }
 
-  let typeCheckExec(ws: Workspace!): Container! {
+  let typeCheckExec(
+    ws: Workspace!,
+    version: String!,
+    configured: Boolean!,
+    excludes: [String!]!,
+  ): Container! {
     let project = tool.lib.at(path)
-    let packages = ["mypy==" + version(ws)]
+    let packages = ["mypy==" + version]
     # A project whose config names its files is checked as configured: a path
     # on the command line would override `files` and check everything else.
-    let targets = if (configuresFiles(ws)) { [] } else { ["."] }
+    let targets = if (configured) { [] } else { ["."] }
     # The environment comes from the library, so the dependency layer
     # underneath is the same one pytest and the other checker get.
     # The project itself is not installed: the checker reads first-party code
     # from the source, so it needs no build backend or compiler.
     project.step(
       project.env(ws, with: packages, installProject: false),
-      project.uvRun(packages) + ["mypy"] + tool.args + targets
-        + project.excludeNestedFlags(ws, "--exclude", regex: true),
+      project.uvRun(packages) + ["mypy"] + tool.args + targets + excludes,
       "mypy",
     )
   }
@@ -243,15 +254,35 @@ type MypyProject {
   and setup.cfg ([mypy]) that configures it, and so does this.
   """
   configuresFiles(ws: Workspace!): Boolean! {
-    let project = tool.lib.at(path)
-    if (project.hasFile(ws, "mypy.ini")) {
-      project.setsKey(ws, "mypy.ini", "mypy", "files")
-    } else if (project.hasFile(ws, ".mypy.ini")) {
-      project.setsKey(ws, ".mypy.ini", "mypy", "files")
-    } else if (project.fileContents(ws, "pyproject.toml").contains("[tool.mypy]")) {
-      project.setsKey(ws, "pyproject.toml", "tool.mypy", "files")
+    filesConfigured(checkInputs(ws).configKeys.{{exists, hasSection, setsKey}})
+  }
+
+  let filesConfigured(
+    probes: [{{exists: Boolean!, hasSection: Boolean!, setsKey: Boolean!}}!]!,
+  ): Boolean! {
+    if (probes[0].exists == true) {
+      probes[0].setsKey ?? false
+    } else if (probes[1].exists == true) {
+      probes[1].setsKey ?? false
+    } else if (probes[2].hasSection == true) {
+      probes[2].setsKey ?? false
     } else {
-      project.setsKey(ws, "setup.cfg", "mypy", "files")
+      probes[3].setsKey ?? false
     }
+  }
+
+  let checkInputs(ws: Workspace!, scope: [String!]! = ["**"]): PyprojectCheckInputs! {
+    tool.lib.at(path).checkInputs(
+      ws,
+      "mypy",
+      scope: scope,
+      configKeys: [
+        ["mypy.ini", "mypy", "files"],
+        [".mypy.ini", "mypy", "files"],
+        ["pyproject.toml", "tool.mypy", "files"],
+        ["setup.cfg", "mypy", "files"],
+      ],
+      excludeRegex: true,
+    )
   }
 }
