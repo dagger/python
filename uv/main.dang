@@ -98,11 +98,9 @@ type Uv {
     UvProjects(
       paths: lib
         .rootsWith(ws, "uv.lock")
-        .map { root => uvProject(root) }.{{path, skipLock, skipAudit}}
-        .filter { project =>
-          includeSkipped or project.skipLock == false or project.skipAudit == false
-        }
-        .map { project => project.path },
+        .filter { root =>
+          includeSkipped or uvProject(root).skipLock == false or uvProject(root).skipAudit == false
+        },
       tool: self,
     )
   }
@@ -194,9 +192,7 @@ type UvProjects @collection {
   Refresh the selected projects' uv.lock.
   """
   lock(ws: Workspace!): Changeset! @generate {
-    let roots = paths.map { p => project(p) }.{{path, skipLock, locked: hasLockfile(ws)}}
-      .filter { p => p.skipLock == false and p.locked }
-      .map { p => p.path }
+    let roots = paths.filter { p => project(p).shouldLock(ws) }
     tool.lockChanges(ws, roots)
   }
 
@@ -258,10 +254,17 @@ type UvProject {
   outside the configured audit selection.
   """
   let auditFailure(ws: Workspace!): String {
-    if (skipAudit) {
+    let inputs = tool.lib.at(path).checkInputs(
+      ws,
+      "uv",
+      scope: tool.audit,
+      sourceGlobs: [],
+      excludeFlag: "",
+    )
+    if (inputs.skip) {
       null
     } else {
-      { auditExec(ws).sync; null } rescue {
+      { auditExec(ws, inputs.hasLockfile).sync; null } rescue {
         err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
           old: "reduce function: ",
           new: "",
@@ -274,7 +277,7 @@ type UvProject {
   Refresh this project's uv.lock.
   """
   lock(ws: Workspace!): Changeset! @generate {
-    if (skipLock or hasLockfile(ws) == false) {
+    if (shouldLock(ws) == false) {
       directory.changes(directory)
     } else {
       tool.lockChanges(ws, [path])
@@ -293,13 +296,24 @@ type UvProject {
     project.step(project.container(ws), ["uv", "lock"], "uv lock")
   }
 
+  let shouldLock(ws: Workspace!): Boolean! {
+    let inputs = tool.lib.at(path).checkInputs(
+      ws,
+      "uv",
+      scope: tool.lock,
+      sourceGlobs: [],
+      excludeFlag: "",
+    )
+    inputs.skip == false and inputs.hasLockfile
+  }
+
   # Auditing reads the lockfile alone, so it mounts only what `uv sync` reads
   # and a source edit leaves it cached.
-  let auditExec(ws: Workspace!): Container! {
+  let auditExec(ws: Workspace!, locked: Boolean!): Container! {
     let project = tool.lib.at(path)
     project.step(
       tool.lib.base.withWorkdir("/ws").withDirectory(".", project.installInputs(ws)).withWorkdir(path),
-      ["uv", "audit"] + project.syncFlags(ws) + tool.auditArgs,
+      ["uv", "audit"] + (if (locked) { ["--locked"] } else { [] }) + tool.auditArgs,
       "uv audit",
     )
   }

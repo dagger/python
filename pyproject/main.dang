@@ -136,6 +136,8 @@ type Pyproject {
       # default hardlink install mode falls back to a copy with a warning.
       .withEnvVariable("UV_LINK_MODE", "copy")
       .withEnvVariable("UV_NO_PROGRESS", "1")
+      .withEnvVariable("UV_COMPILE_BYTECODE", "1")
+      .withEnvVariable("PYC_INVALIDATION_MODE", "CHECKED_HASH")
       .withDirectory("/usr/local/bin", uvBinary, include: ["uv", "uvx"])
   }
 
@@ -775,6 +777,51 @@ type PythonProject {
   }
 
   """
+  Project metadata for a tool run, returned together to avoid a module call
+  for each source, version, configuration and exclusion probe. Each configKeys
+  entry names a file, section and key, in that order.
+  """
+  pub checkInputs(
+    ws: Workspace!,
+    tool: String!,
+    scope: [String!]! = ["**"],
+    sourceGlobs: [String!]! = ["*.py"],
+    sourcePattern: String! = "",
+    configKeys: [[String!]!]! = [],
+    excludeFlag: String! = "--exclude",
+    excludeRegex: Boolean! = false,
+  ): CheckInputs! {
+    let skip = selected(scope) == false
+    CheckInputs(
+      skip: skip,
+      hasSources: if (skip or sourceGlobs.isEmpty) { false } else {
+        hasOwnFiles(ws, sourceGlobs, pattern: sourcePattern)
+      },
+      version: if (skip) { null } else { toolVersion(ws, tool) },
+      configKeys: if (skip) { [] } else {
+        configKeys.map { probe =>
+          if (probe.length != 3) {
+            raise "a config key probe must name a file, section and key"
+          }
+          let file = probe[0] ?? ""
+          let section = probe[1] ?? ""
+          let key = probe[2] ?? ""
+          ConfigKeyResult(
+            exists: hasFile(ws, file),
+            hasSection: fileContents(ws, file).contains("[" + section + "]"),
+            setsKey: setsKey(ws, file, section, key),
+          )
+        }
+      },
+      hasLockfile: if (skip) { false } else { hasFile(ws, "uv.lock") },
+      nestedProjects: if (skip) { [] } else { nestedProjects(ws) },
+      excludeNestedFlags: if (skip or excludeFlag == "") { [] } else {
+        excludeNestedFlags(ws, excludeFlag, regex: excludeRegex)
+      },
+    )
+  }
+
+  """
   Built-in workspace include patterns for this project's own tree.
 
   The whole project tree, not an import-graph subset: uv build backends read
@@ -868,14 +915,18 @@ type PythonProject {
     if (hasFile(ws, "uv.lock")) { ["--locked"] } else { [] }
   }
 
+  let environmentPython: String! {
+    (baseImage.envVariable("UV_PROJECT_ENVIRONMENT") ?? ".venv") + "/bin/python"
+  }
+
   """
   Container with this project's dependencies installed, but not the project
   itself or its local path dependencies, from `installInputs` alone.
 
   `with` names extra packages the caller needs on top of the project's own.
-  They are resolved against the project's environment here, not installed
-  over the top of a finished one, so a conflict fails here, while building the
-  environment. `mount` is placed at `mountPath` for an extra package named
+  They are installed into its environment under constraints from the lockfile,
+  or the installed dependencies when there is no lock, so a conflict fails
+  while building the environment. `mount` is placed at `mountPath` for an extra package named
   by path, after the dependency sync, so every tool shares that layer.
   """
   dependencies(
@@ -893,13 +944,28 @@ type PythonProject {
       ["uv", "sync"] + syncFlags(ws) + ["--no-install-workspace", "--no-install-local"],
       "environment",
     )
-    let mounted = if (mount == null) { synced } else {
-      synced.withDirectory(mountPath, mount)
-    }
     if (with.isEmpty) {
-      mounted
+      if (mount == null) { synced } else { synced.withDirectory(mountPath, mount) }
     } else {
-      step(mounted, uvRun(with) + ["python", "-c", ""], "environment")
+      let constraints = "/tmp/dagger-python-constraints.txt"
+      let constrained = step(
+        synced,
+        if (hasFile(ws, "uv.lock")) {
+          ["uv", "export", "--frozen", "--no-hashes", "--no-emit-project",
+            "--no-emit-workspace", "--no-emit-local", "--output-file", constraints]
+        } else {
+          ["sh", "-c", "uv pip freeze --python \"$1\" > \"$2\"", "sh", environmentPython, constraints]
+        },
+        "environment",
+      )
+      let mounted = if (mount == null) { constrained } else {
+        constrained.withDirectory(mountPath, mount)
+      }
+      step(
+        mounted,
+        ["uv", "pip", "install", "--python", environmentPython, "--constraint", constraints] + with,
+        "environment",
+      )
     }
   }
 
@@ -921,6 +987,8 @@ type PythonProject {
   project's build backend nor a compiler for a native extension, and a
   source edit rebuilds nothing. Its uv workspace members and path sources are
   still installed, when it has any, since its imports of them resolve there.
+
+  Installing the project must leave the extra tools' dependencies compatible.
   """
   env(
     ws: Workspace!,
@@ -929,25 +997,37 @@ type PythonProject {
     mountPath: String! = "/opt/extra",
     installProject: Boolean! = true,
   ): Container! {
+    # uv sync recompiles all site-packages, including unchanged dependencies.
+    # Their bytecode is already cached; project code can compile on import.
     let sourced = dependencies(ws, with: with, mount: mount, mountPath: mountPath)
+      .withEnvVariable("UV_COMPILE_BYTECODE", "0")
       .withWorkdir("/ws")
       .withDirectory(".", source(ws))
       .withWorkdir(path)
-    if (installProject) {
-      step(sourced, ["uv", "sync"] + syncFlags(ws), "environment")
-    } else if (hasLocalDependencies(ws)) {
-      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--no-install-project"], "environment")
+    let local = hasLocalDependencies(ws)
+    let installed = if (installProject) {
+      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--inexact"], "environment")
+    } else if (local) {
+      step(sourced, ["uv", "sync"] + syncFlags(ws) + ["--inexact", "--no-install-project"], "environment")
     } else {
       sourced
+    }
+    if (with.isEmpty == false) {
+      # Missing dependencies are ignored because sync omits packages deliberately;
+      # extras-only conflicts are undetected, and requested-version checks skip URLs/paths.
+      step(installed.withFile("/tmp/check_environment.py", currentModule.source.file("check_environment.py")),
+        [environmentPython, "-I", "-B", "/tmp/check_environment.py"] + with, "environment")
+    } else {
+      installed
     }
   }
 
   """
   The start of a `uv run` command for a tool in `env`: no re-sync, and the
-  extra packages `env` already resolved.
+  extra packages `env` already installed.
   """
   uvRun(packages: [String!]!): [String!]! {
-    ["uv", "run", "--no-sync"] + withFlags(packages)
+    ["uv", "run", "--no-sync"]
   }
 
   """
@@ -980,8 +1060,7 @@ type PythonProject {
   """
   `--with` flags naming extra packages for a uv invocation.
 
-  A caller runs its own command with the same flags, against the resolution
-  `env` already made and cached.
+  Tools installed by `env` need only `uvRun`.
   """
   withFlags(packages: [String!]!): [String!]! {
     packages.reduce([]) { flags, package => flags + ["--with", package] }
@@ -1197,4 +1276,26 @@ type PythonProject {
       ""
     }
   }
+}
+
+"""
+Values a tool needs to select, configure and run a project.
+"""
+type CheckInputs {
+  skip: Boolean!
+  hasSources: Boolean!
+  version: String
+  configKeys: [ConfigKeyResult!]!
+  hasLockfile: Boolean!
+  nestedProjects: [String!]!
+  excludeNestedFlags: [String!]!
+}
+
+"""
+The presence of a configuration file, section and key.
+"""
+type ConfigKeyResult {
+  exists: Boolean!
+  hasSection: Boolean!
+  setsKey: Boolean!
 }

@@ -8,9 +8,9 @@ test run is the same layer mypy and ty get. There is no runner probing and no
 pip path here: this module is uv-based, and a caller who needs something else
 supplies its own base image.
 
-dagger-pytest-otel, the bundled OpenTelemetry plugin, is resolved alongside
-pytest and the project's own dependencies in one uv pass. Installing it over the
-top of a finished environment resolves nothing, so a conflict passes unnoticed.
+dagger-pytest-otel, the bundled OpenTelemetry plugin, is installed with pytest
+under the project's dependency constraints, so a conflict fails while building
+the environment.
 
 https://dagger.io
 https://pytest.org
@@ -152,9 +152,7 @@ type Pytest {
     PytestProjects(
       paths: roots
         .filter { root => owns(roots, root, dirs) }
-        .map { root => pytestProject(root, null) }.{{path, skip}}
-        .filter { project => includeSkipped or project.skip == false }
-        .map { project => project.path },
+        .filter { root => includeSkipped or pytestProject(root, null).skip == false },
       testFiles: files,
       roots: roots,
       tool: self,
@@ -332,10 +330,12 @@ type PytestProject {
   project is outside the configured scope, or it has no test files of its own.
   """
   let testFailure(ws: Workspace!): String {
-    if (skip or hasTests(ws) == false) {
+    let inputs = checkInputs(ws)
+    let sources = if (discovered == null) { inputs.hasSources } else { hasTests(ws) }
+    if (inputs.skip or sources == false) {
       null
     } else {
-      { testExec(ws, []).sync; null } rescue {
+      { testExec(ws, [], inputs.version ?? tool.defaultVersion, inputs.nestedProjects).sync; null } rescue {
         err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
           old: "reduce function: ",
           new: "",
@@ -349,7 +349,8 @@ type PytestProject {
   they fail.
   """
   let runFiles(ws: Workspace!, files: [String!]!): Void {
-    testExec(ws, files).sync rescue {
+    let inputs = checkInputs(ws)
+    testExec(ws, files, inputs.version ?? tool.defaultVersion, inputs.nestedProjects).sync rescue {
       err: Error => raise "pytest failed:\n- " + path + ": " + err
         .message
         .replace(old: "evaluating receiver: ", new: "")
@@ -362,7 +363,12 @@ type PytestProject {
   Container that has run pytest in this project: over the named project-relative
   files, or over the whole project when none are named.
   """
-  let testExec(ws: Workspace!, files: [String!]!): Container! {
+  let testExec(
+    ws: Workspace!,
+    files: [String!]!,
+    version: String!,
+    nested: [String!]!,
+  ): Container! {
     let project = tool.lib.at(path)
 
     # dagger-pytest-otel is mounted and named by path rather than fetched from
@@ -370,14 +376,25 @@ type PytestProject {
     # resolves it with pytest against the project's dependencies while the
     # environment is built, before any source is mounted.
     let plugin = if (tool.tracing) { ["/opt/dagger_pytest_otel"] } else { [] }
-    let packages = ["pytest==" + version(ws)] + plugin
-    let ignoreNested = project.nestedProjects(ws).map { nested => "--ignore=" + nested }
+    let packages = ["pytest==" + version] + plugin
+    let ignoreNested = nested.map { path => "--ignore=" + path }
 
     project.step(
       project.env(ws, with: packages, mount: tool.pytestOtel, mountPath: "/opt/dagger_pytest_otel"),
       project.uvRun(packages) + ["pytest"] + tool.args + ignoreNested + files,
       "pytest",
       nesting: tool.nesting,
+    )
+  }
+
+  let checkInputs(ws: Workspace!): PyprojectCheckInputs! {
+    tool.lib.at(path).checkInputs(
+      ws,
+      "pytest",
+      scope: tool.scope,
+      sourceGlobs: if (discovered == null) { tool.testGlobs } else { [] },
+      sourcePattern: tool.testLine,
+      excludeFlag: "",
     )
   }
 }

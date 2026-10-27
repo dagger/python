@@ -605,6 +605,14 @@ type E2e {
   """
   toolPinCheck(ws: Workspace!): Void @check {
     assert(
+      lib.at(pinnedFixture).checkInputs(ws, "mypy").version == "1.11.2",
+      "the combined project inputs did not take the locked tool version",
+    )
+    assert(
+      lib.at(passFixture).checkInputs(ws, "mypy").version == null,
+      "the combined project inputs invented a tool version",
+    )
+    assert(
       mypy.versionFor(ws, pinnedFixture) == "1.11.2",
       "mypy did not take the version pinned in uv.lock: "
         + mypy.versionFor(ws, pinnedFixture),
@@ -841,6 +849,33 @@ type E2e {
       "the shared environment was rebuilt instead of reused",
     )
 
+    let dependencyWs = ws.withNewFile(
+      passFixture + "/pyproject.toml",
+      ws.file("/" + passFixture + "/pyproject.toml").contents + "\ndependencies = [\"packaging==25.0\"]\n",
+    )
+    let bytecodeCheck = "import importlib.util, pathlib, packaging\n" +
+      "pyc = pathlib.Path(importlib.util.cache_from_source(packaging.__file__))\n" +
+      "assert pyc.is_file(), 'dependency bytecode is missing'\n" +
+      "assert int.from_bytes(pyc.read_bytes()[4:8], 'little') == 3, 'bytecode is not checked-hash'\n"
+    [project.dependencies(dependencyWs), project.env(dependencyWs)].each { env =>
+      env
+        .withoutMount("/root/.cache/uv")
+        .withExec([".venv/bin/python", "-I", "-B", "-c", bytecodeCheck])
+        .sync
+    }
+
+    let editedBuild = ws.withNewFile(
+      buildFixture + "/src/project_build/__init__.py",
+      "def packaged() -> str:\n    return 'edited'\n",
+    )
+    lib
+      .project(editedBuild, buildFixture)
+      .env(editedBuild, with: ["packaging==25.0"])
+      .withoutMount("/root/.cache/uv")
+      .withExec([".venv/bin/python", "-I", "-B", "-c", bytecodeCheck +
+        "import project_build\nassert project_build.packaged() == 'edited'\n"])
+      .sync
+
     # The project itself does not depend on packaging; the extra does.
     let bare = {
       project.env(ws).withExec(["uv", "run", "python", "-c", "import packaging"]).sync
@@ -855,14 +890,238 @@ type E2e {
 
     let withExtra = project.env(ws, with: ["packaging"])
     withExtra
-      .withExec(["uv", "run"] + project.withFlags(["packaging"])
-        + ["python", "-c", "import packaging"])
+      .withoutMount("/root/.cache/uv")
+      .withExec(project.uvRun(["packaging"])
+        + ["python", "-I", "-c", "import packaging, sys; assert packaging.__file__.startswith(sys.prefix + '/')"])
       .sync
+
+    let lockedWs = dependencyWs.withNewFile(
+      passFixture + "/uv.lock",
+      project.dependencies(dependencyWs).file("uv.lock").contents,
+    )
+    [dependencyWs, lockedWs].each { input =>
+      let failure = {
+        project.dependencies(input, with: ["packaging==24.2"]).sync
+        "built"
+      } rescue { err: Error => err.message }
+      assert(
+        failure.contains("environment failed (uv pip install") and failure.contains("packaging"),
+        "a tool replaced a constrained dependency: " + failure,
+      )
+      pyproject(markers: ["pyproject.toml"], base: lib.base.withEnvVariable("UV_PROJECT_ENVIRONMENT", "/opt/venv"))
+        .project(input, passFixture)
+        .env(input, with: ["packaging==25.0"])
+        .withoutMount("/root/.cache/uv")
+        .withExec(["/opt/venv/bin/python", "-I", "-B", "-c", bytecodeCheck +
+          "import sys\nassert sys.prefix == '/opt/venv'\n"])
+        .sync
+    }
+
+    let buildConfig = ws.file("/" + buildFixture + "/pyproject.toml").contents
+    let conflictingTool = directory
+      .withNewFile("pyproject.toml", buildConfig
+        .replace(old: "project-build", new: "conflicting-tool")
+        .replace(old: "[build-system]", new: "dependencies = [\"packaging<25\"]\n\n[build-system]"))
+      .withNewFile("src/conflicting_tool/__init__.py", "")
+    let transitiveTool = directory
+      .withNewFile("pyproject.toml", buildConfig
+        .replace(old: "project-build", new: "outer-tool")
+        .replace(old: "[build-system]", new: "dependencies = [\"conflicting-tool @ file:///opt/extra/inner\"]\n\n[build-system]"))
+      .withNewFile("src/outer_tool/__init__.py", "")
+      .withDirectory("inner", conflictingTool)
+    let compatibleTool = conflictingTool.withNewFile("pyproject.toml", buildConfig
+      .replace(old: "project-build", new: "conflicting-tool")
+      .replace(old: "[build-system]", new: "dependencies = [\"packaging>=1\"]\n\n[build-system]"))
+    [
+      "[tool.uv.sources]\npackaging = { path = \"local\" }\n",
+      "[tool.uv.workspace]\nmembers = [\"local\"]\n\n[tool.uv.sources]\npackaging = { workspace = true }\n",
+    ].each { sourceConfig =>
+      let localWs = ws
+        .withNewFile(passFixture + "/pyproject.toml",
+          ws.file("/" + passFixture + "/pyproject.toml").contents +
+            "\ndependencies = [\"packaging\"]\n\n" + sourceConfig)
+        .withNewFile(passFixture + "/local/pyproject.toml", buildConfig
+          .replace(old: "project-build", new: "packaging")
+          .replace(old: "0.2.0", new: "25.0"))
+        .withNewFile(passFixture + "/local/src/packaging/__init__.py", "")
+      let lockedLocal = localWs.withNewFile(
+        passFixture + "/uv.lock",
+        project.dependencies(localWs).file("uv.lock").contents,
+      )
+      let compatibleWs = localWs.withNewFile(passFixture + "/local/pyproject.toml", buildConfig
+        .replace(old: "project-build", new: "packaging")
+        .replace(old: "0.2.0", new: "999.0"))
+      let lockedCompatible = compatibleWs.withNewFile(passFixture + "/uv.lock",
+        project.dependencies(compatibleWs).file("uv.lock").contents)
+      [compatibleWs, lockedCompatible].each { input =>
+        project.env(input, with: ["/opt/compatible"], mount: compatibleTool, mountPath: "/opt/compatible")
+          .withExec([".venv/bin/python", "-I", "-c",
+            "import importlib.metadata as m\nassert m.version('packaging') == '999.0'\n"])
+          .sync
+      }
+      [localWs, lockedLocal].each { input =>
+        [true, false].each { installProject =>
+          [conflictingTool, transitiveTool].each { tool =>
+            let failure = {
+              project.env(input,
+                with: ["/opt/extra"], mount: tool,
+                installProject: installProject).sync
+              "built"
+            } rescue { err: Error => err.message }
+            assert(
+              failure.contains("environment failed (")
+                and failure.contains("The package `conflicting-tool` requires `packaging<25`"),
+              "a tool conflicted with an installed local package: " + failure,
+            )
+          }
+        }
+      }
+    }
+
+    let rootWs = ws
+      .withNewFile(passFixture + "/pyproject.toml", buildConfig
+        .replace(old: "project-build", new: "packaging")
+        .replace(old: "0.2.0", new: "25.0"))
+      .withNewFile(passFixture + "/src/packaging/__init__.py", "")
+    let lockedRoot = rootWs.withNewFile(
+      passFixture + "/uv.lock", project.dependencies(rootWs).file("uv.lock").contents,
+    )
+    let wheels = lib.base
+      .withFile("/tmp/tool_wheels.py", ws.file("/.dagger/modules/e2e/tool_wheels.py"))
+      .withExec(["python", "/tmp/tool_wheels.py"])
+    let wheelName = "conflicting_tool-0.2.0-py3-none-any.whl"
+    let wheelHash = wheels.withExec(["sha256sum", "/wheels/" + wheelName]).stdout.split(" ").takeFirst(1).join("")
+    [rootWs, lockedRoot].each { input =>
+      let failure = {
+        project.env(input, with: ["/opt/extra"], mount: conflictingTool).sync
+        "built"
+      } rescue { err: Error => err.message }
+      assert(
+        failure.contains("environment failed (")
+          and failure.contains("The package `conflicting-tool` requires `packaging<25`"),
+        "installing the root replaced a tool dependency: " + failure,
+      )
+      let pinFailure = {
+        project.env(input, with: ["packaging==24.2"]).sync
+        "built"
+      } rescue { err: Error => err.message }
+      assert(
+        pinFailure.contains("environment failed (")
+          and pinFailure.contains("The requested tools require `packaging==24.2`, but `25.0` is installed"),
+        "the root silently replaced the requested tool version: " + pinFailure,
+      )
+      let urlFailure = {
+        project.env(input,
+          with: ["conflicting-tool @ file:///opt/extra/" + wheelName + "#sha256=" + wheelHash],
+          mount: wheels.directory("/wheels")).sync
+        "built"
+      } rescue { err: Error => err.message }
+      assert(
+        urlFailure.contains("environment failed (")
+          and urlFailure.contains("The package `conflicting-tool` requires `packaging<25`"),
+        "a hashed wheel URL lost dependency validation: " + urlFailure,
+      )
+    }
+
+    let urlCheck = lib.base
+      .withEnvVariable("UV_OFFLINE", "1")
+      .withEnvVariable("UV_NO_INDEX", "1")
+      .withEnvVariable("UV_PYTHON_DOWNLOADS", "never")
+      .withDirectory("/wheels", wheels.directory("/wheels"))
+      .withExec(["uv", "venv", "/tmp/env", "--python", "python3"])
+      .withExec(["uv", "pip", "install", "--python", "/tmp/env/bin/python", "--no-deps",
+        "/wheels/" + wheelName, "/wheels/packaging-25.0-py3-none-any.whl"])
+      .withFile("/tmp/check_environment.py", ws.file("/pyproject/check_environment.py"))
+      .withExec(["/tmp/env/bin/python", "-I", "-B", "/tmp/check_environment.py",
+        "https://example.invalid/" + wheelName + "#sha256=" + wheelHash], expect: ReturnType.ANY)
+    assert(urlCheck.exitCode == 1 and urlCheck.stderr.contains(
+      "The package `conflicting-tool` requires `packaging<25`"),
+      "a bare hashed wheel URL lost dependency validation: " + urlCheck.stderr)
+    assert(urlCheck.directory("/tmp/env").glob("**/dagger_tools_*").isEmpty,
+      "validation left temporary distribution metadata behind")
+    let missingDependency = urlCheck
+      .withExec(["uv", "pip", "uninstall", "--python", "/tmp/env/bin/python", "packaging"])
+      .withExec(["/tmp/env/bin/python", "-I", "-B", "/tmp/check_environment.py",
+        "https://example.invalid/" + wheelName + "#sha256=" + wheelHash])
+      .withExec(["uv", "--color", "never", "pip", "check", "--python", "/tmp/env/bin/python"],
+        expect: ReturnType.ANY)
+    assert(missingDependency.exitCode == 1 and missingDependency.stderr.contains(
+      "The package `conflicting-tool` requires `packaging<25`, but it's not installed"),
+      "the missing-package control did not produce uv's expected diagnostic: " + missingDependency.stderr)
+
+    let compatibleRoot = rootWs.withNewFile(passFixture + "/pyproject.toml", buildConfig
+      .replace(old: "project-build", new: "packaging")
+      .replace(old: "0.2.0", new: "999.0"))
+    let lockedCompatibleRoot = compatibleRoot.withNewFile(passFixture + "/uv.lock",
+      project.dependencies(compatibleRoot).file("uv.lock").contents)
+    [compatibleRoot, lockedCompatibleRoot].each { input =>
+      project.env(input, with: ["/opt/extra"], mount: compatibleTool)
+        .withExec([".venv/bin/python", "-I", "-c",
+          "import importlib.metadata as m\nassert m.version('packaging') == '999.0'\n"])
+        .sync
+    }
+
+    [
+      "[tool.uv.sources]\nreviewer-group = { path = \"group\" }\n",
+      "[tool.uv.workspace]\nmembers = [\"group\"]\n\n[tool.uv.sources]\nreviewer-group = { workspace = true }\n",
+    ].each { sourceConfig =>
+      let virtualWs = ws
+        .withNewFile(passFixture + "/pyproject.toml", buildConfig
+          .replace(old: "[build-system]", new: "dependencies = [\"reviewer-group\"]\n\n[build-system]") +
+            "\n" + sourceConfig)
+        .withNewFile(passFixture + "/src/project_build/__init__.py", "VALUE = 'source'\n")
+        .withNewFile(passFixture + "/group/pyproject.toml",
+          "[project]\nname = \"reviewer-group\"\nversion = \"1.0\"\n" +
+            "dependencies = [\"packaging==25.0\"]\n\n[tool.uv]\npackage = false\n")
+      let lockedVirtual = virtualWs.withNewFile(passFixture + "/uv.lock",
+        project.dependencies(virtualWs).file("uv.lock").contents)
+      [virtualWs, lockedVirtual].each { input =>
+        let checked = project.env(input, with: ["packaging==25.0"])
+          .withExec([".venv/bin/python", "-I", "-B", "-c",
+            "import project_build, packaging\nassert project_build.VALUE == 'source'\n"])
+          .withExec(["uv", "--color", "never", "pip", "check"], expect: ReturnType.ANY)
+        assert(checked.exitCode == 1 and checked.stderr.contains(
+          "The package `project-build` requires `reviewer-group`, but it's not installed"),
+          "a virtual dependency was not omitted by sync: " + checked.stderr)
+      }
+    }
+
+    let pluginWs = ws
+      .withNewFile(passFixture + "/pyproject.toml", buildConfig
+        .replace(old: "project-build", new: "Root.App") +
+          "\n[dependency-groups]\ndev = [\"local-plugin\"]\n\n[tool.uv.sources]\nlocal-plugin = { path = \"plugin\" }\n")
+      .withNewFile(passFixture + "/root_app.py", "VALUE = 'source'\n")
+      .withNewFile(passFixture + "/plugin/pyproject.toml", buildConfig
+        .replace(old: "project-build", new: "local-plugin")
+        .replace(old: "[build-system]", new: "dependencies = [\"root_app==0.2.0\"]\n\n[build-system]"))
+      .withNewFile(passFixture + "/plugin/src/local_plugin/__init__.py", "from root_app import VALUE\n")
+    let lockedPlugin = pluginWs.withNewFile(
+      passFixture + "/uv.lock", project.dependencies(pluginWs).file("uv.lock").contents,
+    )
+    let quotedPlugin = pluginWs.withNewFile(passFixture + "/pyproject.toml",
+      pluginWs.file("/" + passFixture + "/pyproject.toml").contents.replace(old: "[project]", new: "[\"project\"]"))
+    let lockedQuotedPlugin = quotedPlugin.withNewFile(passFixture + "/uv.lock",
+      project.dependencies(quotedPlugin).file("uv.lock").contents)
+    [pluginWs, lockedPlugin, quotedPlugin, lockedQuotedPlugin].each { input =>
+      project.env(input, with: ["packaging==25.0"], installProject: false)
+        .withExec(project.uvRun(["packaging==25.0"]) + ["python", "-c",
+          "import importlib.metadata as m, re, root_app, local_plugin, packaging\n" +
+            "assert root_app.VALUE == local_plugin.VALUE == 'source'\n" +
+            "assert 'root-app' not in {re.sub(r'[-_.]+', '-', d.metadata['Name']).lower() for d in m.distributions()}\n"])
+        .sync
+      run(mypy.project(input, passFixture).typeCheck(input))
+      run(ty.project(input, passFixture).typeCheck(input))
+    }
 
     # Dependencies install from the files uv reads, before any source is
     # mounted, so a source edit leaves that layer cached.
     let edited = ws.withNewFile(passFixture + "/greeting.py", "GREETING = 'edited'\n")
     let editedProject = lib.project(edited, passFixture)
+    assert(
+      project.dependencies(ws, with: ["packaging"]).rootfs.digest
+        == editedProject.dependencies(edited, with: ["packaging"]).rootfs.digest,
+      "a source edit changed the installed tools",
+    )
     assert(
       project.installInputs(ws).glob("**") == editedProject.installInputs(edited).glob("**"),
       "a source edit changed the dependency layer's inputs",
@@ -928,6 +1187,20 @@ type E2e {
   file below the project root, and both checkers take extra arguments.
   """
   typeCheckConfigCheck(ws: Workspace!): Void @check {
+    let inputs = lib.at(metacharFixture).checkInputs(ws, "mypy", excludeRegex: true)
+    assert(inputs.hasSources and inputs.skip == false, "the combined inputs lost the project's sources")
+    assert(
+      inputs.excludeNestedFlags == ["--exclude", "^sub\\.v2/"],
+      "the combined inputs did not escape the nested project: " + inputs.excludeNestedFlags.join(" "),
+    )
+    assert(
+      lib.at(deepFixture).checkInputs(ws, "mypy").hasSources == false,
+      "the combined inputs found sources in an empty project",
+    )
+    assert(
+      lib.at(passFixture).checkInputs(ws, "mypy", scope: ["!" + passFixture]).skip,
+      "the combined inputs ignored the project selection",
+    )
     let configured = mypy.project(ws, mypyFilesFixture)
     assert(configured.configuresFiles(ws), "mypy did not see the configured files")
     assert(
@@ -936,6 +1209,29 @@ type E2e {
     )
     # scripts/ holds a type error outside the configured files.
     run(configured.typeCheck(ws))
+
+    let hiddenIni = ws.withNewFile(mypyFilesFixture + "/.mypy.ini", "[mypy]\nignore_missing_imports = true\n")
+    assert(
+      mypy.project(hiddenIni, mypyFilesFixture).configuresFiles(hiddenIni) == false,
+      ".mypy.ini did not take precedence over pyproject.toml",
+    )
+    let ini = hiddenIni.withNewFile(mypyFilesFixture + "/mypy.ini", "[mypy]\nfiles = src\n")
+    assert(
+      mypy.project(ini, mypyFilesFixture).configuresFiles(ini),
+      "mypy.ini did not take precedence over .mypy.ini",
+    )
+    let setup = ws
+      .withNewFile(mypyFilesFixture + "/pyproject.toml", "[project]\nname = \"configured\"\nversion = \"0.1.0\"\n")
+      .withNewFile(mypyFilesFixture + "/setup.cfg", "[mypy]\nfiles = src\n")
+    assert(
+      mypy.project(setup, mypyFilesFixture).configuresFiles(setup),
+      "setup.cfg was not read when pyproject.toml had no mypy section",
+    )
+    let emptySection = setup.withNewFile(mypyFilesFixture + "/pyproject.toml", "[tool.mypy]\n")
+    assert(
+      mypy.project(emptySection, mypyFilesFixture).configuresFiles(emptySection) == false,
+      "a mypy section without files fell through to setup.cfg",
+    )
 
     let strict = failureOf(
       mypy(args: ["--strict"]).project(ws, mypyFilesFixture).typeCheck(ws),
@@ -1467,6 +1763,18 @@ type E2e {
     assert(keys.contains(noTestsFixture2) == false, "a project without test files is a key")
     assert(keys.contains(deepFixture) == false, "a project without test files is a key")
     assert(projects.get(key: passFixture).path == passFixture, "get did not return the project at its key")
+
+    let changed = ws.withNewFile(passFixture + "/tests/test_greeting.py",
+      "raise RuntimeError('previously discovered test executed')\n")
+    let discoveredFailure = {
+      projects.get(key: passFixture).test(changed)
+      "passed"
+    } rescue { err: Error => err.message }
+    assert(
+      discoveredFailure.contains("previously discovered test executed"),
+      "a collection project searched for its tests again: " + discoveredFailure,
+    )
+    pytest.project(changed, passFixture).test(changed)
 
     projects.subset(keys: [passFixture, nestedFixture, skipFixture]).batch.test(ws)
     let failures = {
