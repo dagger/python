@@ -176,6 +176,17 @@ pytest a base that has one:
 $ dagger settings pytest base ghcr.io/astral-sh/uv:python3.14-bookworm
 ```
 
+A git dependency from a private repository needs a token. `gitToken` takes a
+secret, which git presents to `gitHost` (`github.com` by default) and to no
+other host. It reaches git through a credential helper declared in `GIT_CONFIG_*`
+variables, so it is written to no file, URL or `uv.lock`. In CI, a GitHub App
+installation token with read access to the repository is a good fit:
+
+```toml
+[modules.pytest.settings]
+gitToken = "env://GIT_TOKEN"
+```
+
 A failure names the step: the environment, or the tool, with its command, exit
 code and the end of its output.
 
@@ -332,6 +343,8 @@ mount.
 | `nesting`        | `true`    | Let tests reach a nested Dagger engine.                     |
 | `version`        | `3.14`    | Python version of the default base image.                   |
 | `base`           | none      | Base image with Python and uv, instead of the default one.  |
+| `gitToken`       | none      | Secret git presents to `gitHost`, for private git dependencies. |
+| `gitHost`        | `github.com` | Host `gitToken` is presented to.                         |
 
 On a project: `tests`, `test`, `has-tests`, `version`, `skip`. `tests` is a
 collection of the project's test files, keyed by project-relative path, and its
@@ -391,6 +404,8 @@ the module its address names instead of looking for it inside this module.
 | `auditArgs` | `[]`   | Extra arguments for `uv audit`, e.g. `["--no-dev"]`.       |
 | `version` | `3.14`   | Python version of the default base image.                  |
 | `base`    | none     | Base image with Python and uv, instead of the default one. |
+| `gitToken` | none    | Secret git presents to `gitHost`, for private git dependencies. |
+| `gitHost` | `github.com` | Host `gitToken` is presented to.                       |
 
 On a project: `audit` (a `@check`, `uv audit`), `lock` (a `@generate`,
 `uv lock`), `build` (`uv build`, returns `dist` with the wheel and sdist),
@@ -425,6 +440,8 @@ failing it would be wrong.
 | `args`           | `[]`                      | Extra arguments for every run, e.g. `["--strict"]`. |
 | `version`        | `3.14`                    | Python version of the default base image.  |
 | `base`           | none                      | Base image with Python and uv.             |
+| `gitToken`       | none                      | Secret git presents to `gitHost`, for private git dependencies. |
+| `gitHost`        | `github.com`              | Host `gitToken` is presented to.           |
 
 On a project: `type-check` (a `@check`), `has-sources`, `version`, `skip`, and
 for mypy `configures-files`. Both modules name the check `type-check`, so
