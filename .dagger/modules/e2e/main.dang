@@ -52,18 +52,18 @@ type E2e {
   }
 
   """
-  Assert that a batch failure names every failing project and no passing one.
+  Assert that a collection failure names every failing project and no passing one.
   """
   let assertReports(failure: String!, failing: [String!]!, passing: [String!]!): Void {
     let unreported = failing.reject { path => failure.contains("- " + path + ":") }
     assert(
       unreported.isEmpty,
-      "the batch did not report every failing project (" + unreported.join(", ") + "): " + failure,
+      "the collection did not report every failing project (" + unreported.join(", ") + "): " + failure,
     )
     let reported = passing.filter { path => failure.contains("- " + path + ":") }
     assert(
       reported.isEmpty,
-      "the batch reported a passing project (" + reported.join(", ") + "): " + failure,
+      "the collection reported a passing project (" + reported.join(", ") + "): " + failure,
     )
   }
 
@@ -485,7 +485,7 @@ type E2e {
   let ruffRangeOldFixture: String! = "testdata/project-ruff-range-old"
 
   """
-  Fixtures that are broken on purpose, left out so the batch checks
+  Fixtures that are broken on purpose, left out so the collection runs
   describe a healthy workspace.
   """
   let healthy: [String!]! = [
@@ -515,7 +515,7 @@ type E2e {
   project with no Python source of its own.
   """
   mypyCheck(ws: Workspace!): Void @check {
-    run(mypy(scope: healthy).projects(ws).batch.typeCheck(ws))
+    mypy(scope: healthy).projects(ws).typeCheck(ws)
 
     let failure = mypyFailure(ws, typeFailFixture)
     assert(
@@ -523,23 +523,19 @@ type E2e {
       "mypy did not fail on a type error: " + failure,
     )
 
-    # A batch that quietly selected nothing would pass the call above, so
+    # A collection run that quietly selected nothing would pass the call above, so
     # point it at the project that fails and require the failure to surface.
-    let batch = failureOf(
-      mypy(scope: [typeFailFixture]).projects(ws).batch.typeCheck(ws),
-    )
+    let collected = { mypy(scope: [typeFailFixture]).projects(ws).typeCheck(ws); "passed" } rescue { err: Error => err.message }
     assert(
-      batch.contains("exit code"),
-      "the batch type check did not run the failing project it selected: " + batch,
+      collected.contains("exit code"),
+      "the collection type check did not run the failing project it selected: " + collected,
     )
 
     # A deselected project is not checked even though it is broken, by its own
-    # check or by the batch.
+    # check or by the collection.
     let deselected = mypy(scope: ["**", "!" + typeFailFixture])
     run(deselected.project(ws, typeFailFixture).typeCheck(ws))
-    run(
-      deselected.projects(ws).subset(keys: [typeFailFixture]).batch.typeCheck(ws),
-    )
+    deselected.projects(ws).subset(keys: [typeFailFixture]).typeCheck(ws)
 
     # No Python source of its own, so nothing to check.
     run(mypy.project(ws, deepFixture).typeCheck(ws))
@@ -590,7 +586,7 @@ type E2e {
   ty reaches the same verdicts as mypy on the same fixtures.
   """
   tyCheck(ws: Workspace!): Void @check {
-    run(ty(scope: healthy).projects(ws).batch.typeCheck(ws))
+    ty(scope: healthy).projects(ws).typeCheck(ws)
 
     let failure = tyFailure(ws, typeFailFixture)
     assert(
@@ -630,7 +626,7 @@ type E2e {
 
   """
   mypy's and ty's projects form collections keyed by project root: a project
-  with no Python source of its own is not a key, a subset batch runs only its
+  with no Python source of its own is not a key, a subset runs only its
   own projects, and every failing project is reported.
   """
   typeCheckCollectionCheck(ws: Workspace!): Void @check {
@@ -646,18 +642,12 @@ type E2e {
     assert(mypy.project(ws, deepFixture).hasSources(ws) == false, "a project with no Python source reported some")
 
     let subset = [passFixture, typeFailFixture, nestedChildFixture]
-    let mypyFailures = failureOf(
-      mypy.projects(ws).subset(keys: subset).batch.typeCheck(ws),
-    )
-    let tyFailures = failureOf(
-      ty.projects(ws).subset(keys: subset).batch.typeCheck(ws),
-    )
+    let mypyFailures = { mypy.projects(ws).subset(keys: subset).typeCheck(ws); "passed" } rescue { err: Error => err.message }
+    let tyFailures = { ty.projects(ws).subset(keys: subset).typeCheck(ws); "passed" } rescue { err: Error => err.message }
     assertReports(mypyFailures, [typeFailFixture, nestedChildFixture], [passFixture])
     assertReports(tyFailures, [typeFailFixture, nestedChildFixture], [passFixture])
 
-    run(
-      mypy.projects(ws).subset(keys: [passFixture, nestedFixture]).batch.typeCheck(ws),
-    )
+    mypy.projects(ws).subset(keys: [passFixture, nestedFixture]).typeCheck(ws)
     null
   }
 
@@ -685,10 +675,10 @@ type E2e {
       "the refreshed uv.lock did not pick up the new requires-python",
     )
 
-    let driftedAll = uv(lock: [lockDriftFixture]).projects(ws).batch.lock(ws)
+    let driftedAll = uv(lock: [lockDriftFixture]).projects(ws).lock(ws)
     assert(
       driftedAll.modifiedPaths.contains(lockDriftFixture + "/uv.lock"),
-      "the batch lock did not re-lock the drifted project it selected: "
+      "the collection lock did not re-lock the drifted project it selected: "
         + (driftedAll.modifiedPaths + driftedAll.addedPaths).join(", "),
     )
 
@@ -713,16 +703,16 @@ type E2e {
       "a deselected project was locked anyway",
     )
 
-    let all = uv(lock: ["**", "!" + lockDriftFixture]).projects(ws).batch.lock(ws)
+    let all = uv(lock: ["**", "!" + lockDriftFixture]).projects(ws).lock(ws)
     assert(
       all.addedPaths.isEmpty and all.modifiedPaths.isEmpty and all.removedPaths.isEmpty,
-      "the batch lock rewrote up-to-date lockfiles: "
+      "the collection lock rewrote up-to-date lockfiles: "
         + (all.addedPaths + all.modifiedPaths + all.removedPaths).join(", "),
     )
 
     # The CLI applies a changeset at the caller's cwd, so it is rooted there.
     let fromProject = ws.withWorkdir(lockDriftFixture)
-    let local = uv.projects(fromProject).batch.lock(fromProject)
+    let local = uv.projects(fromProject).lock(fromProject)
     assert(
       local.modifiedPaths == ["uv.lock"],
       "a changeset from inside the project was not rooted at the cwd: " + changedPaths(local),
@@ -736,7 +726,7 @@ type E2e {
       uv.projects(insideOtel).keys == [otelSource],
       "uv keys from inside a project: " + uv.projects(insideOtel).keys.join(", "),
     )
-    let otelLock = uv.projects(insideOtel).batch.lock(insideOtel)
+    let otelLock = uv.projects(insideOtel).lock(insideOtel)
     assert(isEmpty(otelLock), "locking from inside a project reached above the cwd: " + changedPaths(otelLock))
     null
   }
@@ -770,13 +760,13 @@ type E2e {
       args.contains("uv audit failed (uv audit --locked --no-such-flag"),
       "uv audit did not take its args, or did not name the step: " + args,
     )
-    run(uv(audit: ["**", "!" + lockDriftFixture]).projects(ws).batch.audit(ws))
+    uv(audit: ["**", "!" + lockDriftFixture]).projects(ws).audit(ws)
     null
   }
 
   """
   uv's projects form a collection keyed by the roots of the projects that have
-  a uv.lock: a subset batch locks and audits only its own projects, and a
+  a uv.lock: a subset locks and audits only its own projects, and a
   project deselected for one verb is still a key for the other.
   """
   uvCollectionCheck(ws: Workspace!): Void @check {
@@ -787,13 +777,13 @@ type E2e {
     assert(keys.contains(passFixture) == false, "a project without a uv.lock is a uv key")
 
     let pair = uv.projects(ws).subset(keys: [lockDriftFixture, regenerateFixture])
-    let locked = pair.batch.lock(ws)
+    let locked = pair.lock(ws)
     assert(
       locked.modifiedPaths == [lockDriftFixture + "/uv.lock"] and locked.addedPaths.isEmpty,
-      "the batch lock did not return exactly the drifted lockfile: " + changedPaths(locked),
+      "the collection lock did not return exactly the drifted lockfile: " + changedPaths(locked),
     )
     assert(
-      isEmpty(uv.projects(ws).subset(keys: [regenerateFixture]).batch.lock(ws)),
+      isEmpty(uv.projects(ws).subset(keys: [regenerateFixture]).lock(ws)),
       "a subset without the drifted project locked it anyway",
     )
 
@@ -809,17 +799,15 @@ type E2e {
       "includeSkipped false dropped a project that is still audited",
     )
     assert(
-      isEmpty(split.projects(ws).subset(keys: [lockDriftFixture]).batch.lock(ws)),
-      "a deselected project was locked by the batch",
+      isEmpty(split.projects(ws).subset(keys: [lockDriftFixture]).lock(ws)),
+      "a deselected project was locked by the collection",
     )
-    run(
-      uv.projects(ws).subset(keys: [regenerateFixture, pinnedFixture]).batch.audit(ws),
-    )
+    uv.projects(ws).subset(keys: [regenerateFixture, pinnedFixture]).audit(ws)
 
-    let dist = uv.projects(ws).subset(keys: [regenerateFixture]).batch.build(ws).glob("**/*.whl")
+    let dist = uv.projects(ws).subset(keys: [regenerateFixture]).build(ws).glob("**/*.whl")
     assert(
       dist.length == 1 and dist.all { file => file.hasPrefix(regenerateFixture + "/") },
-      "the batch build did not place the wheel under its project root: " + dist.join(", "),
+      "the collection build did not place the wheel under its project root: " + dist.join(", "),
     )
     null
   }
@@ -1115,7 +1103,7 @@ type E2e {
   deselected project alone.
   """
   ruffCheck(ws: Workspace!): Void @check {
-    run(ruff(scope: ruffHealthy).projects(ws).batch.lint(ws))
+    ruff(scope: ruffHealthy).projects(ws).lint(ws)
 
     let failure = failureOf(ruff.project(ws, lintFailFixture).lint(ws))
     assert(
@@ -1123,16 +1111,14 @@ type E2e {
       "ruff did not fail on a lint violation: " + failure,
     )
 
-    let batch = failureOf(
-      ruff(scope: [lintFailFixture]).projects(ws).batch.lint(ws),
-    )
+    let collected = { ruff(scope: [lintFailFixture]).projects(ws).lint(ws); "passed" } rescue { err: Error => err.message }
     assert(
-      batch.contains("exit code"),
-      "the batch lint did not run the failing project it selected: " + batch,
+      collected.contains("exit code"),
+      "the collection lint did not run the failing project it selected: " + collected,
     )
 
     # A deselected project is still a key, but neither its own lint nor the
-    # batch runs it.
+    # collection runs it.
     let deselected = ruff(scope: ["**", "!" + lintFailFixture])
     run(deselected.project(ws, lintFailFixture).lint(ws))
     assert(deselected.project(ws, lintFailFixture).skip, "a deselected project was not skipped")
@@ -1144,9 +1130,7 @@ type E2e {
       deselected.projects(ws, includeSkipped: false).keys.contains(lintFailFixture) == false,
       "includeSkipped false kept a deselected project",
     )
-    run(
-      deselected.projects(ws).subset(keys: [lintFailFixture, passFixture]).batch.lint(ws),
-    )
+    deselected.projects(ws).subset(keys: [lintFailFixture, passFixture]).lint(ws)
 
     assert(
       ruff.version.contains("ruff"),
@@ -1159,7 +1143,7 @@ type E2e {
   Every tool's keys follow the cwd: from a project root, that project and the
   projects below it; from inside a project, exactly the enclosing project;
   from outside any project, the projects below. From inside a project, the
-  batches run that project with no selection at all.
+  collection helpers run that project with no selection at all.
   """
   cwdSelectionCheck(ws: Workspace!): Void @check {
     let atRoot = ws.withWorkdir(nestedFixture)
@@ -1223,20 +1207,17 @@ type E2e {
     )
     assertKeys("uv at an unlocked root", uv.projects(atRoot).keys, [])
 
-    # With no selection, the batches run the enclosing project, and a failure
+    # With no selection, the collection helpers run the enclosing project, and a failure
     # there is its own.
     let insidePass = ws.withWorkdir(passFixture + "/tests")
-    run(ruff.projects(insidePass).batch.lint(insidePass))
-    run(mypy.projects(insidePass).batch.typeCheck(insidePass))
-    pytest.projects(insidePass).batch.test(insidePass)
-    run(
-      pytest.projects(insidePass).get(key: passFixture).tests(insidePass).batch.test(insidePass),
-    )
-    assertReports(
-      failureOf(mypy.projects(insideChild).batch.typeCheck(insideChild)),
-      [nestedChildFixture],
-      [nestedFixture],
-    )
+    ruff.projects(insidePass).lint(insidePass)
+    mypy.projects(insidePass).typeCheck(insidePass)
+    pytest.projects(insidePass).test(insidePass)
+    pytest.projects(insidePass).get(key: passFixture).tests(insidePass).test(insidePass)
+    let insideFailure = { mypy.projects(insideChild).typeCheck(insideChild); "passed" } rescue {
+      err: Error => err.message
+    }
+    assertReports(insideFailure, [nestedChildFixture], [nestedFixture])
     null
   }
 
@@ -1246,8 +1227,8 @@ type E2e {
 
   """
   ruff's projects form a collection keyed by project root: get and subset stay
-  within the keys, a subset
-  batch runs only its own projects, and every failing project is reported.
+  within the keys, a subset runs only its own projects, and every failing
+  project is reported.
   """
   ruffCollectionCheck(ws: Workspace!): Void @check {
     let projects = ruff.projects(ws)
@@ -1293,23 +1274,21 @@ type E2e {
 
     let none = projects.subset(keys: [])
     assert(none.keys.isEmpty, "empty subset kept keys: " + none.keys.join(", "))
-    run(none.batch.lint(ws))
-    assert(isEmpty(none.batch.format(ws)), "an empty subset formatted something")
+    none.lint(ws)
+    assert(isEmpty(none.format(ws)), "an empty subset formatted something")
 
     # The failing projects are keys, but a subset without them passes.
-    run(projects.subset(keys: [passFixture, nestedFixture]).batch.lint(ws))
+    projects.subset(keys: [passFixture, nestedFixture]).lint(ws)
 
     # Every failing project is reported, and a passing one is not.
-    let both = failureOf(
-      projects.subset(keys: [passFixture, lintFailFixture, ruffTomlFixture]).batch.lint(ws),
-    )
+    let both = { projects.subset(keys: [passFixture, lintFailFixture, ruffTomlFixture]).lint(ws); "passed" } rescue { err: Error => err.message }
     assertReports(both, [lintFailFixture, ruffTomlFixture], [passFixture])
     null
   }
 
   """
-  ruff formats what needs formatting and leaves the rest alone, and the batch
-  returns one changeset over the selected projects.
+  ruff formats what needs formatting and leaves the rest alone, and the
+  collection's `format` returns one changeset over the selected projects.
   """
   ruffFormatCheck(ws: Workspace!): Void @check {
     let changed = ruff.project(ws, unformattedFixture).format(ws)
@@ -1321,11 +1300,11 @@ type E2e {
     let clean = ruff.project(ws, passFixture).format(ws)
     assert(isEmpty(clean), "ruff format rewrote an already-formatted project: " + changedPaths(clean))
 
-    let batch = ruff.projects(ws).subset(keys: [passFixture, unformattedFixture]).batch.format(ws)
+    let collected = ruff.projects(ws).subset(keys: [passFixture, unformattedFixture]).format(ws)
     assert(
-      sameFiles(batch.modifiedPaths, [unformattedFixture + "/sub/narrow.py", unformattedFixture + "/wide.py"])
-        and batch.addedPaths.isEmpty,
-      "the batch format did not return exactly the unformatted files: " + changedPaths(batch),
+      sameFiles(collected.modifiedPaths, [unformattedFixture + "/sub/narrow.py", unformattedFixture + "/wide.py"])
+        and collected.addedPaths.isEmpty,
+      "the collection format did not return exactly the unformatted files: " + changedPaths(collected),
     )
 
     let skipped = ruff(scope: ["!" + unformattedFixture]).project(ws, unformattedFixture).format(ws)
@@ -1333,7 +1312,7 @@ type E2e {
 
     # The CLI applies a changeset at the caller's cwd, so it is rooted there.
     let fromProject = ws.withWorkdir(unformattedFixture)
-    let local = ruff.projects(fromProject).batch.format(fromProject)
+    let local = ruff.projects(fromProject).format(fromProject)
     assert(
       sameFiles(local.modifiedPaths, ["sub/narrow.py", "wide.py"]),
       "a changeset from the project root was not rooted at the cwd: " + changedPaths(local),
@@ -1351,7 +1330,7 @@ type E2e {
     let fromSub = ws.withWorkdir(unformattedFixture + "/sub")
     let sub = ruff.projects(fromSub)
     assert(sub.keys == [unformattedFixture], "keys from inside a project: " + sub.keys.join(", "))
-    let below = sub.batch.format(fromSub)
+    let below = sub.format(fromSub)
     assert(
       below.modifiedPaths == ["narrow.py"] and below.addedPaths.isEmpty,
       "a changeset from inside the project did not hold just the part below the cwd: "
@@ -1377,10 +1356,10 @@ type E2e {
       isEmpty(ruff.project(ws, passFixture).fix(ws)),
       "ruff fix changed a clean project",
     )
-    let batch = ruff.projects(ws).subset(keys: [passFixture, lintFailFixture]).batch.fix(ws)
+    let collected = ruff.projects(ws).subset(keys: [passFixture, lintFailFixture]).fix(ws)
     assert(
-      batch.modifiedPaths == [lintFailFixture + "/unused.py"],
-      "the batch fix did not return exactly the fixed file: " + changedPaths(batch),
+      collected.modifiedPaths == [lintFailFixture + "/unused.py"],
+      "the collection fix did not return exactly the fixed file: " + changedPaths(collected),
     )
     null
   }
@@ -1393,7 +1372,7 @@ type E2e {
   having no tests yet used to fail the whole check.
   """
   pytestCheck(ws: Workspace!): Void @check {
-    pytest(scope: pytestHealthy).projects(ws).batch.test(ws)
+    pytest(scope: pytestHealthy).projects(ws).test(ws)
 
     let failure = {
       pytest.project(ws, testFailFixture).test(ws)
@@ -1412,7 +1391,7 @@ type E2e {
     )
     # The fix: no test files means skipped, not exit 5.
     pytest.project(ws, noTestsFixture2).test(ws)
-    run(pytest.project(ws, noTestsFixture2).tests(ws).batch.test(ws))
+    pytest.project(ws, noTestsFixture2).tests(ws).test(ws)
 
     assert(
       pytest.hasTests(ws, passFixture),
@@ -1437,7 +1416,7 @@ type E2e {
     deselected.test(ws)
     assert(deselected.skip, "a deselected project was not skipped")
     assert(deselected.tests(ws).keys.isEmpty, "a deselected project offered test files")
-    run(deselected.tests(ws).batch.test(ws))
+    deselected.tests(ws).test(ws)
     null
   }
 
@@ -1468,9 +1447,9 @@ type E2e {
     assert(keys.contains(deepFixture) == false, "a project without test files is a key")
     assert(projects.get(key: passFixture).path == passFixture, "get did not return the project at its key")
 
-    projects.subset(keys: [passFixture, nestedFixture, skipFixture]).batch.test(ws)
+    projects.subset(keys: [passFixture, nestedFixture, skipFixture]).test(ws)
     let failures = {
-      projects.subset(keys: [passFixture, testFailFixture, nestedChildFixture]).batch.test(ws)
+      projects.subset(keys: [passFixture, testFailFixture, nestedChildFixture]).test(ws)
       "passed"
     } rescue {
       err: Error => err.message
@@ -1506,19 +1485,430 @@ type E2e {
     }
     assert(unknown == "rejected", "subset accepted an unknown test file")
 
-    # One test file runs on its own, and fails only when it is the broken one.
-    run(tests.get(key: passing).test(ws))
-    let one = failureOf(tests.get(key: broken).test(ws))
-    assert(one.contains("exit code"), "the broken test file passed on its own: " + one)
+    # Each file's top-level tests are a collection keyed by name, in byte order.
+    assert(
+      tests.get(key: broken).tests.keys == ["test_broken"],
+      "test discovery found: " + tests.get(key: broken).tests.keys.join(", "),
+    )
+    let skipping = pytest.project(ws, skipFixture).tests(ws).get(key: "tests/test_skipping.py").tests.keys
+    assert(
+      skipping == ["test_called_skip", "test_marked_skip", "test_runs"],
+      "test discovery found: " + skipping.join(", "),
+    )
 
-    # The whole collection runs the whole project, which fails; filtered to its
-    # passing file, the same project passes, so only the selection ran.
-    let whole = failureOf(tests.batch.test(ws))
-    assert(whole.contains("exit code"), "the project's whole test run passed: " + whole)
-    run(tests.subset(keys: [passing]).batch.test(ws))
-    let filtered = failureOf(tests.subset(keys: [broken]).batch.test(ws))
-    assert(filtered.contains("exit code"), "the broken test file passed in a subset: " + filtered)
-    run(tests.subset(keys: []).batch.test(ws))
+    # A test check reads its own result from the shared run of the collection
+    # it is given: the broken test fails, and the passing one passes beside it.
+    let passingTest = tests.get(key: passing).tests.get(key: "test_passing")
+    let brokenTest = tests.get(key: broken).tests.get(key: "test_broken")
+    run(passingTest.test(ws, selection: tests))
+    let one = failureOf(brokenTest.test(ws, selection: tests))
+    assert(one.contains("test_broken failed"), "the broken test passed: " + one)
+    run(passingTest.test(ws, selection: tests.subset(keys: [passing])))
+    let excluded = failureOf(brokenTest.test(ws, selection: tests.subset(keys: [passing])))
+    assert(
+      excluded.contains("outside the test selection"),
+      "a test outside its selection did not say so: " + excluded,
+    )
+
+    # The collection helper runs the selection once and reports every failing
+    # test; filtered to its passing file, the same project passes.
+    let whole = { tests.test(ws); "passed" } rescue { err: Error => err.message }
+    assert(
+      whole.contains(testFailFixture + "/tests/test_broken.py::test_broken: test_broken failed")
+        and whole.contains("test_passing") == false,
+      "the project's test run did not report exactly the broken test: " + whole,
+    )
+    tests.subset(keys: [passing]).test(ws)
+    let filtered = { tests.subset(keys: [broken]).test(ws); "passed" } rescue { err: Error => err.message }
+    assert(filtered.contains("test_broken failed"), "the broken test file passed in a subset: " + filtered)
+    tests.subset(keys: []).test(ws)
+    null
+  }
+
+  # Only the unindented CHECKS header counts. Nested TESTS summaries can
+  # report correct pytest results even when Dagger attributes the checks
+  # incorrectly.
+  let checkSummaryMatches(output: String!, passed: Int!, failed: Int!): Boolean! {
+    let headers = output.split("\n").filter { line =>
+      line.hasPrefix("CHECKS ") or line.hasPrefix("== CHECKS ==")
+    }
+    let expected = (if (failed > 0) { ["✘", `${failed}`, "failed"] } else { [] })
+      + (if (passed > 0) { ["✔", `${passed}`, "passed"] } else { [] })
+    headers.length == 1 and headers[0]!.trimPrefix("== ").trimPrefix("CHECKS").trimPrefix(" ==")
+      .trimSpace.split(" ").filter { word => word != "" } == expected
+  }
+
+  """
+  The check totals the selection checks read are the CLI's own, not the
+  nested test summaries.
+  """
+  selectedSummaryCheck: Void @check {
+    let wrong = "CHECKS  ✘ 8 failed\n  TESTS\n    ✘ 1 failed\n    ✔ 7 passed\n"
+    assert(checkSummaryMatches(wrong, 7, 1) == false, "nested test counts hid failed checks")
+    assert(checkSummaryMatches(wrong, 0, 8), "zero passing checks were not recognized")
+    assert(checkSummaryMatches("CHECKS  ✔ 18 passed\n", 8, 0) == false, "accepted a partial count")
+    assert(checkSummaryMatches("CHECKS  ✘ 1 failed  ✔ 7 passed\n", 7, 1), "mixed counts were not recognized")
+    assert(checkSummaryMatches("== CHECKS ==  ✔ 8 passed\n", 8, 0), "agent report was not recognized")
+    assert(checkSummaryMatches("  CHECKS  ✔ 8 passed\n", 8, 0) == false, "accepted a nested header")
+    null
+  }
+
+  """
+  The engine's own CLI, run over a fixture workspace whose dagger.toml is
+  `config`, with this repository's library and `modules` mounted at /source.
+  """
+  let cli(ws: Workspace!, fixture: Directory!, modules: [String!]!, config: String!, args: [String!]!): Container! {
+    container
+      .from("alpine:3.24.1")
+      # The CLI's workspace is this container, and discovery searches it with
+      # the ripgrep found here.
+      .withExec(["apk", "add", "--no-cache", "ripgrep"])
+      .withEnvVariable("NO_COLOR", "1")
+      .withDirectory(
+        "/source",
+        ws.directory(
+          "/",
+          include: ["dagger.toml", "dagger.lock", "pyproject/**"] + modules.map { module => module + "/**" },
+          exclude: lib.exclude,
+        ),
+      )
+      # The modules' dependency on ../pyproject resolves within the repository
+      # a .git marks.
+      .withNewFile("/source/.git/HEAD", "ref: refs/heads/main\n")
+      .withDirectory("/work", fixture)
+      .withNewFile("/work/.git/HEAD", "ref: refs/heads/main\n")
+      .withNewFile("/work/dagger.toml", config)
+      .withWorkdir("/work")
+      .withExec(["/dev/.dagger/dagger", "--progress=report"] + args, expect: ANY, daggerInDaggerNewSession: true)
+  }
+
+  # The dagger.toml lines that install `module` from /source with `settings`.
+  let moduleConfig(module: String!, settings: String!): String! {
+    "[modules." + module + "]\nsource = \"/source/" + module + "\"\n\n[modules." + module + ".settings]\n" + settings + "\n"
+  }
+
+  """
+  Run `dagger check` with the engine's own CLI over a fixture workspace that
+  installs one module from this repository, pytest by default, and assert the
+  check totals and messages; return the output.
+
+  Direct Dang calls do not apply the engine's filtered collection view, so
+  only the CLI shows what a selection really runs and how each test check is
+  attributed.
+  """
+  let selectedCheck(
+    ws: Workspace!,
+    fixture: Directory!,
+    args: [String!]!,
+    passed: Int!,
+    failed: Int! = 0,
+    messages: [String!]! = [],
+    module: String! = "pytest",
+    # A nested engine for the tests would only slow this down.
+    settings: String! = "nesting = false\n",
+  ): String! {
+    let result = cli(ws, fixture, [module], moduleConfig(module, settings), ["check", "--generated=false"] + args)
+    let output = result.stdout + result.stderr
+    assert((result.exitCode == 0) == (failed == 0), "unexpected check exit status:\n" + output)
+    assert(checkSummaryMatches(output, passed, failed), "unexpected Dagger check totals:\n" + output)
+    messages.map { message =>
+      assert(output.contains(message), "missing " + message + ":\n" + output)
+    }
+    output
+  }
+
+  let selectionPyproject(name: String!): String! {
+    "[project]\nname = \"" + name + "\"\nversion = \"0\"\nrequires-python = \">=3.10\"\n"
+  }
+
+  let selectionTests: String! = "def test_foo():\n    pass\n\n\ndef test_bar():\n    pass\n\n\ndef test_other():\n    raise AssertionError(\"excluded test ran\")\n"
+
+  """
+  Two projects of three test files, each with test_foo, test_bar and a
+  test_other that fails if it runs. The third file fails to import, so it
+  fails the run if it is collected at all.
+  """
+  let selectionFixture: Directory! {
+    ["p1", "p2"].reduce(directory) { fixture, project =>
+      fixture
+        .withNewFile(project + "/pyproject.toml", selectionPyproject(project))
+        .withNewFile(project + "/tests/test_a.py", selectionTests)
+        .withNewFile(project + "/tests/test_b.py", selectionTests)
+        .withNewFile(project + "/tests/test_unused.py", "raise ImportError(\"excluded file ran\")\n\n\n" + selectionTests)
+    }
+  }
+
+  let selectionArgs: [String!]! {
+    ["p1", "p2"].map { project => "--pytest-project=" + project }
+      + ["tests/test_a.py", "tests/test_b.py"].map { file => "--pytest-test-file=" + file }
+      + ["test_foo", "test_bar"].map { name => "--pytest-test=" + name }
+  }
+
+  """
+  A selection over two projects, two files and two tests runs exactly those
+  eight checks, and nothing it leaves out runs.
+  """
+  selectedTestsCheck(ws: Workspace!): Void @check {
+    selectedCheck(ws, selectionFixture, selectionArgs, passed: 8)
+    null
+  }
+
+  """
+  With only files selected, each file runs as a whole, so a failing test in
+  it fails its own check and no other.
+  """
+  selectedFileCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      selectionFixture,
+      ["--pytest-project=p1", "--pytest-test-file=tests/test_a.py"],
+      passed: 2,
+      failed: 1,
+      # The report may show the failing test's span rather than the check's
+      # own error when it has one, so assert what both show.
+      messages: ["excluded test ran"],
+    )
+    null
+  }
+
+  """
+  A failing selected test fails only its own check.
+  """
+  selectedFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile(
+      "p1/tests/test_a.py",
+      "def test_foo():\n    raise AssertionError(\"selected failure\")\n\n\ndef test_bar():\n    pass\n",
+    )
+    selectedCheck(ws, fixture, selectionArgs, passed: 7, failed: 1, messages: ["selected failure"])
+    null
+  }
+
+  """
+  A file that fails to import fails every selected test in it, and only
+  those: the other files of the project still run.
+  """
+  selectedImportFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile("p2/tests/test_a.py", "import no_such_module\n\n\n" + selectionTests)
+    selectedCheck(
+      ws,
+      fixture,
+      selectionArgs,
+      passed: 6,
+      failed: 2,
+      messages: ["tests/test_a.py failed outside a selected test check", "no_such_module"],
+    )
+    null
+  }
+
+  # One project of two passing tests, run as a whole.
+  let reportingFixture: Directory! {
+    directory
+      .withNewFile("r/pyproject.toml", selectionPyproject("r"))
+      .withNewFile("r/tests/test_ok.py", "def test_ok():\n    pass\n")
+      .withNewFile("r/tests/test_visible.py", "def test_visible():\n    pass\n")
+  }
+
+  # A test pytest collects but discovery misses: it is not declared at the
+  # top level of its file.
+  let hiddenFailure: String! = "\n\nif True:\n\n    def test_hidden():\n        raise AssertionError(\"undiscovered failure\")\n"
+
+  """
+  A failure in a file with no test checks fails every check of the project
+  run: it belongs to none of them, and passing them all would hide it.
+  """
+  selectedOutsideFailureCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      reportingFixture.withNewFile("r/tests/test_hidden.py", hiddenFailure),
+      ["--pytest-project=r"],
+      passed: 0,
+      failed: 2,
+      messages: ["undiscovered failure"],
+    )
+    null
+  }
+
+  """
+  A failing test discovery missed, in a file it found, fails that file's
+  checks and no other.
+  """
+  selectedUndiscoveredFailureCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      reportingFixture.withNewFile("r/tests/test_visible.py", "def test_visible():\n    pass\n" + hiddenFailure),
+      ["--pytest-project=r"],
+      passed: 1,
+      failed: 1,
+      messages: ["pytest-test-file=tests/test_visible.py&pytest-test=test_visible", "undiscovered failure"],
+    )
+    null
+  }
+
+  """
+  A selected test pytest never runs fails rather than passing with nothing
+  behind it: a test class with __init__ is declared like a test, but pytest
+  does not collect it.
+  """
+  selectedNeverRanCheck(ws: Workspace!): Void @check {
+    selectedCheck(
+      ws,
+      reportingFixture.withNewFile(
+        "r/tests/test_visible.py",
+        "def test_visible():\n    pass\n\n\nclass TestHelper:\n    def __init__(self):\n        pass\n\n    def test_x(self):\n        pass\n",
+      ),
+      ["--pytest-project=r"],
+      passed: 2,
+      failed: 1,
+      messages: ["TestHelper did not run: pytest passed tests/test_visible.py without it"],
+    )
+    null
+  }
+
+  """
+  For ruff, as for mypy, ty and uv, a project is a check of its own: each
+  selected project runs its own command and fails on its own, a project left
+  out is not run, and no collection-level check runs them a second time.
+  """
+  selectedProjectsCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("a/pyproject.toml", selectionPyproject("a"))
+      .withNewFile("a/clean.py", "VALUE = 1\n")
+      .withNewFile("b/pyproject.toml", selectionPyproject("b"))
+      .withNewFile("b/unused.py", "import os\n")
+      .withNewFile("c/pyproject.toml", selectionPyproject("c"))
+      .withNewFile("c/unused.py", "import sys\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--ruff-project=a", "--ruff-project=b"],
+      passed: 1,
+      failed: 1,
+      messages: ["check=lint&ruff-project=b", "ruff check failed (ruff check, exit code 1)", "F401"],
+      module: "ruff",
+      settings: "",
+    )
+    null
+  }
+
+  """
+  Every test check of a project reads the one pytest run of that project:
+  each test fails with a token its session drew at random, and every failure
+  in a project carries the same token, while the two projects' differ.
+  """
+  selectedOneRunCheck(ws: Workspace!): Void @check {
+    let fixture = ["p1", "p2"].reduce(directory) { fixture, project =>
+      let failing = "def test_foo(token):\n    raise AssertionError(\"RUN-TOKEN " + project + " \" + token)\n\n\n"
+        + "def test_bar(token):\n    raise AssertionError(\"RUN-TOKEN " + project + " \" + token)\n"
+      fixture
+        .withNewFile(project + "/pyproject.toml", selectionPyproject(project))
+        .withNewFile(
+          project + "/tests/conftest.py",
+          "import os\n\nimport pytest\n\n\n@pytest.fixture(scope=\"session\")\ndef token():\n    return os.urandom(8).hex()\n",
+        )
+        .withNewFile(project + "/tests/test_a.py", failing)
+        .withNewFile(project + "/tests/test_b.py", failing)
+    }
+    let output = selectedCheck(ws, fixture, selectionArgs, passed: 0, failed: 8)
+    let p1 = output.matchAll(`RUN-TOKEN p1 ([0-9a-f]{16})`).map { m => m.captures[0] ?? "" }
+    let p2 = output.matchAll(`RUN-TOKEN p2 ([0-9a-f]{16})`).map { m => m.captures[0] ?? "" }
+    assert(p1.length >= 4 and p2.length >= 4, "not every failing check showed its run's token:\n" + output)
+    assert(p1.uniq.length == 1, "project p1 ran pytest more than once: " + p1.uniq.join(", "))
+    assert(p2.uniq.length == 1, "project p2 ran pytest more than once: " + p2.uniq.join(", "))
+    assert(p1.uniq != p2.uniq, "two projects shared one pytest run")
+    null
+  }
+
+  """
+  Under pytest-xdist, workers collect for themselves, and the selection still
+  holds there: excluded tests and files do not run.
+  """
+  selectedXdistCheck(ws: Workspace!): Void @check {
+    let fixture = ["p1", "p2"].reduce(selectionFixture) { fixture, project =>
+      fixture.withNewFile(
+        project + "/pyproject.toml",
+        selectionPyproject(project) + "dependencies = [\"pytest-xdist==3.8.0\"]\n",
+      )
+    }
+    # The selected tests fail unless an xdist worker runs them, so a setting
+    # that did not reach pytest cannot pass for one that did.
+    let inWorker = "import os\n\n\ndef test_foo():\n    assert os.environ.get(\"PYTEST_XDIST_WORKER\")\n\n\n"
+      + "def test_bar():\n    assert os.environ.get(\"PYTEST_XDIST_WORKER\")\n\n\n"
+      + "def test_other():\n    raise AssertionError(\"excluded test ran\")\n"
+    let workers = ["p1", "p2"].reduce(fixture) { files, project =>
+      files.withNewFile(project + "/tests/test_a.py", inWorker).withNewFile(project + "/tests/test_b.py", inWorker)
+    }
+    selectedCheck(ws, workers, selectionArgs, passed: 8, settings: "nesting = false\nargs = [\"-v\", \"-n\", \"2\"]\n")
+    null
+  }
+
+  """
+  An environment that cannot be built fails every selected test of its
+  project, and no other project's.
+  """
+  selectedEnvironmentFailureCheck(ws: Workspace!): Void @check {
+    let fixture = selectionFixture.withNewFile(
+      "p2/pyproject.toml",
+      selectionPyproject("p2") + "dependencies = [\"dagger-e2e-no-such-package==0.0.0\"]\n",
+    )
+    selectedCheck(ws, fixture, selectionArgs, passed: 4, failed: 4, messages: ["environment failed"])
+    null
+  }
+
+  """
+  For mypy, as for ty and pytest, an environment that cannot be built fails
+  its own project's check and no other.
+  """
+  selectedTypeCheckProjectsCheck(ws: Workspace!): Void @check {
+    let fixture = directory
+      .withNewFile("a/pyproject.toml", selectionPyproject("a"))
+      .withNewFile("a/main.py", "VALUE: int = 1\n")
+      .withNewFile("b/pyproject.toml", selectionPyproject("b") + "dependencies = [\"dagger-e2e-no-such-package==0.0.0\"]\n")
+      .withNewFile("b/main.py", "VALUE: int = 1\n")
+      .withNewFile("c/pyproject.toml", selectionPyproject("c"))
+      .withNewFile("c/main.py", "VALUE: int = \"not an int\"\n")
+    selectedCheck(
+      ws,
+      fixture,
+      ["--mypy-project=a", "--mypy-project=b"],
+      passed: 1,
+      failed: 1,
+      messages: ["check=type-check&mypy-project=b", "environment failed"],
+      module: "mypy",
+      settings: "",
+    )
+    null
+  }
+
+  """
+  Listing runs no tool and builds no environment: with every module's base
+  an image that has no Python, uv or ruff, so any tool step would fail, a
+  dependency that does not exist, a lockfile and a config that are garbage,
+  and a test file that cannot import, every module still lists its checks.
+  (A setting's image is resolved when the module loads, so the base must
+  exist.)
+  """
+  listingCheck(ws: Workspace!): Void @check {
+    let broken = "\"alpine:3.24.1\""
+    let modules = ["pytest", "ruff", "mypy", "ty", "uv"]
+    let config = modules.map { module =>
+      moduleConfig(module, if (module == "ruff") { "container = " + broken } else { "base = " + broken })
+    }.join("\n")
+    let fixture = directory
+      .withNewFile("app/pyproject.toml", selectionPyproject("app") + "dependencies = [\"dagger-e2e-no-such-package==0.0.0\"]\n")
+      .withNewFile("app/uv.lock", "this is not a lockfile\n")
+      .withNewFile("app/ruff.toml", "this is not toml\n")
+      .withNewFile("app/main.py", "import no_such_module\n")
+      .withNewFile("app/tests/test_app.py", "import no_such_module\n\n\ndef test_listed():\n    pass\n")
+    let result = cli(ws, fixture, modules, config, ["check", "-l", "--all", "-f", "cli"])
+    let output = result.stdout + result.stderr
+    assert(result.exitCode == 0, "listing failed:\n" + output)
+    [
+      "--pytest-project=app --pytest-test-file=tests/test_app.py --pytest-test=test_listed",
+      "--ruff-project=app",
+      "--mypy-project=app",
+      "--ty-project=app",
+      "--uv-project=app",
+    ].map { row => assert(output.contains(row), "listing missed " + row + ":\n" + output) }
     null
   }
 }

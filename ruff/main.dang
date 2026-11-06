@@ -217,9 +217,12 @@ type RuffProjects @collection {
   }
 
   """
-  Lint the selected projects with ruff.
+  Lint the selected projects with ruff, each with its own command.
+
+  A plain function rather than a check, so that `dagger check` does not run
+  the same work twice: each project's own `lint` is its check.
   """
-  lint(ws: Workspace!): Void @check {
+  lint(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so every
     # project is linted in parallel and every failure is reported.
     let failures = paths.map { p => project(p) }.{{path, failure: lintFailure(ws)}}
@@ -233,9 +236,12 @@ type RuffProjects @collection {
   }
 
   """
-  Format the selected projects with ruff.
+  Format the selected projects with ruff, as one changeset.
+
+  A plain function rather than a generator: each project's own `format` is
+  its generator.
   """
-  format(ws: Workspace!): Changeset! @generate {
+  format(ws: Workspace!): Changeset! {
     let roots = paths.map { p => project(p) }.filter { p => p.skip == false }.map { p => p.path }
     tool.changes(ws, roots, ["format"]) rescue {
       err: Error => raise tool.clean(err.message)

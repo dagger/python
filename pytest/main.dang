@@ -31,11 +31,46 @@ type Pytest {
   let testGlobs: [String!]! = ["test_*.py", "*_test.py"]
 
   """
-  A line that declares a test pytest collects by default: a function whose
-  name starts with "test", or a class whose name starts with "Test". A file
-  matching `testGlobs` without one is a helper, and holds no tests to run.
+  A line that declares a top-level test pytest collects by default: a
+  module-level function whose name starts with "test", or a class whose name
+  starts with "Test". Each one is a test check. A file matching `testGlobs`
+  without one is a helper, and holds no tests to run.
   """
-  let testLine: String! = `^\s*((async\s+)?def\s+test|class\s+Test)`
+  let testLine: String! = `^((async\s+)?def\s+test|class\s+Test)`
+
+  """
+  The test a `testLine` match declares, as its first capture.
+  """
+  let testName: Regexp! = `^(?:(?:async\s+)?def|class)\s+([^\s(:]+)`
+
+  """
+  The bundled pytest runner that records every outcome as a JSON line, and the
+  indexer that reads that report into one result per test check.
+  """
+  let reportHelpers: Directory! {
+    currentModule.source.directory("helpers/pytest-report")
+  }
+
+  """
+  A pinned interpreter for the indexer, the same for every project whatever
+  its base, so its step is shared by every test check of a project.
+  """
+  let indexerBase: Container! {
+    container.from("python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d").withoutEntrypoint
+  }
+
+  """
+  Whether pytest's default recursion collects a project-relative test file:
+  no directory on its way matches the default `norecursedirs` ("*.egg", ".*",
+  "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}"). A file
+  there is listed by no check, as a whole-project run collects none of it.
+  """
+  let collected(file: String!): Boolean! {
+    file.split("/").dropLast(1).any { dir =>
+      dir.hasPrefix(".") or dir.hasSuffix(".egg")
+        or ["_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}"].contains(dir)
+    } == false
+  }
 
   """
   Python version used for the default base image. Null when a custom base is set.
@@ -144,21 +179,64 @@ type Pytest {
   fault is having no tests yet.
   """
   projects(ws: Workspace!, includeSkipped: Boolean! = true): PytestProjects! {
-    # One search finds every project's test files, and each project's own are
+    # One search finds every project's tests, and each project's own are
     # handed to it from here rather than searched for again.
-    let files = lib.ownedFiles(ws, testGlobs, pattern: testLine)
-    let dirs = files.map { file => file.split("/").dropLast(1).join("/") }.uniq
+    let tests = testNodes(lib.ownedMatches(ws, testGlobs, testLine).{{path, line}})
     let roots = lib.roots(ws)
     PytestProjects(
       paths: roots
-        .filter { root => owns(roots, root, dirs) }
+        .filter { root =>
+          let prefix = if (root == ".") { "" } else { root + "/" }
+          ownPaths(roots, root, tests).any { test => collected(test.trimPrefix(prefix)) }
+        }
         .map { root => pytestProject(root, null) }.{{path, skip}}
         .filter { project => includeSkipped or project.skip == false }
         .map { project => project.path },
-      testFiles: files,
+      tests: tests,
       roots: roots,
       tool: self,
     )
+  }
+
+  """
+  The top-level tests that `testLine` matches, each as its file path, a tab and
+  its name, unique and in byte order. A tab sorts below every character of a
+  path, so a file's tests are adjacent and files come in byte order.
+  """
+  let testNodes(matches: [{{path: String!, line: String!}}!]!): [String!]! {
+    sorted(
+      matches.map { found =>
+        found.path + "\t" + found.line.matchAll(testName).map { m => m.captures[0] ?? "" }.join("")
+      }.reject { node => node.hasSuffix("\t") },
+    ).uniq
+  }
+
+  # Strings in byte order, as Go's sort.Strings orders them. The test command
+  # every check of a project shares is built from these, so the same selection
+  # must always give the same bytes. Dang has no list sort.
+  let sorted(items: [String!]!): [String!]! {
+    if (items.length < 2) {
+      items
+    } else {
+      let half = items.length / 2
+      mergeSorted(sorted(items.takeFirst(half)), sorted(items.dropFirst(half)))
+    }
+  }
+
+  let mergeSorted(a: [String!]!, b: [String!]!): [String!]! {
+    let i = 0
+    let j = 0
+    (a + b).map { unused =>
+      if (j == b.length or (i < a.length and a[i]! <= b[j]!)) {
+        let item = a[i]!
+        i += 1
+        item
+      } else {
+        let item = b[j]!
+        j += 1
+        item
+      }
+    }
   }
 
   """
@@ -178,10 +256,6 @@ type Pytest {
     paths
       .filter { path => path == root or path.hasPrefix(prefix) }
       .reject { path => deeper.any { other => path == other or path.hasPrefix(other + "/") } }
-  }
-
-  let owns(roots: [String!]!, root: String!, dirs: [String!]!): Boolean! {
-    ownPaths(roots, root, dirs).isEmpty == false
   }
 
   let pytestProject(root: String!, discovered: [String!]): PytestProject! {
@@ -204,6 +278,7 @@ type Pytest {
   }
 }
 
+
 # Keep all Dang types in one source file until Dagger can convert Workspace
 # arguments for installed multi-file Dang modules. See dagger/dagger#13476.
 
@@ -216,9 +291,9 @@ type PytestProjects @collection {
   """
   paths: [String!]! @keys
 
-  # Every key's test files, workspace-root-relative, from the one search that
-  # found the keys.
-  let testFiles: [String!]!
+  # Every key's tests, as workspace-root-relative file, tab, name, from the one
+  # search that found the keys.
+  let tests: [String!]!
 
   # Every discovered project root, keys or not, which decides whose each test
   # file is.
@@ -230,11 +305,14 @@ type PytestProjects @collection {
   The pytest project rooted at path.
   """
   project(path: String!): PytestProject! @get {
-    tool.pytestProject(path, tool.ownPaths(roots, path, testFiles))
+    tool.pytestProject(path, tool.ownPaths(roots, path, tests))
   }
 
   """
-  Run the tests of the selected projects.
+  Run the tests of the selected projects, each as a whole.
+
+  A plain function rather than a check, so that `dagger check` does not run
+  the same tests twice: each project's tests are its checks.
   """
   test(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so every
@@ -259,8 +337,8 @@ type PytestProject {
   """
   path: String!
 
-  # This project's test files, workspace-root-relative, when the collection
-  # that built it already found them; null to search for them.
+  # This project's tests, as workspace-root-relative file, tab, name, when the
+  # collection that built it already found them; null to search for them.
   let discovered: [String!]
 
   let tool: Pytest!
@@ -289,35 +367,53 @@ type PytestProject {
   }
 
   """
-  Test files in this project, keyed by project-relative path. Empty when the
-  project is outside the configured scope.
+  Test files in this project, keyed by project-relative path, each with its
+  top-level tests. Empty when the project is outside the configured scope.
   """
   tests(ws: Workspace!): PytestTestFiles! {
-    PytestTestFiles(files: testFiles(ws), project: self)
-  }
-
-  # Test files are found by searching for pytest's default file name patterns
-  # and a test declaration, so listing them runs no container. A project that
-  # changes python_files, python_functions or testpaths in its pytest config is
-  # still listed by the defaults; the whole-project run honours its config.
-  let testFiles(ws: Workspace!): [String!]! {
     let empty: [String!]! = []
-    if (skip) { empty } else { ownTests(ws) }
+    let nodes = if (skip) { empty } else { ownTests(ws) }
+    let files = nodes.map { node => node.split("\t")[0]! }.uniq
+    # Nodes are in byte order with a file's tests adjacent, so each file takes
+    # the next run of them.
+    let next = 0
+    let entries = files.map { file =>
+      let names = nodes.dropFirst(next).takeWhile { node => node.hasPrefix(file + "\t") }
+      next += names.length
+      PytestTestFileSelection(
+        path: file,
+        tests: PytestTests(
+          names: names.map { node => node.trimPrefix(file + "\t") },
+          file: file,
+          project: self,
+        ),
+      )
+    }
+    PytestTestFiles(files: files, entries: entries, project: self)
   }
 
+  # Tests are found by searching for pytest's default file name patterns and
+  # top-level test declarations, so listing them runs no container. A project
+  # that changes python_files, python_functions or testpaths in its pytest
+  # config is still listed by the defaults; the whole-project run honours its
+  # config. Project-relative file, tab, name, in byte order.
   let ownTests(ws: Workspace!): [String!]! {
     let empty: [String!]! = []
-    if (discovered == null) {
-      tool.lib.at(path).ownFiles(ws, tool.testGlobs, pattern: tool.testLine)
+    let nodes = if (discovered == null) {
+      tool.testNodes(tool.lib.at(path).ownMatches(ws, tool.testGlobs, tool.testLine).{{path, line}})
     } else {
-      (discovered ?? empty).map { file =>
-        if (path == ".") { file } else { file.trimPrefix(path + "/") }
-      }
+      discovered ?? empty
     }
+    let relative = if (path == "." or discovered == null) { nodes } else {
+      nodes.map { node => node.trimPrefix(path + "/") }
+    }
+    relative.filter { node => tool.collected(node) }
   }
 
   """
-  Run this project's tests.
+  Run this project's tests as a whole, as pytest collects them.
+
+  A plain function rather than a check: each test is its own check.
   """
   test(ws: Workspace!): Void {
     let failure = testFailure(ws)
@@ -335,7 +431,7 @@ type PytestProject {
     if (skip or hasTests(ws) == false) {
       null
     } else {
-      { testExec(ws, []).sync; null } rescue {
+      { testExec(ws).sync; null } rescue {
         err: Error => err.message.replace(old: "evaluating receiver: ", new: "").replace(
           old: "reduce function: ",
           new: "",
@@ -344,41 +440,98 @@ type PytestProject {
     }
   }
 
-  """
-  Run the tests in the named project-relative files, naming this project when
-  they fail.
-  """
-  let runFiles(ws: Workspace!, files: [String!]!): Void {
-    testExec(ws, files).sync rescue {
-      err: Error => raise "pytest failed:\n- " + path + ": " + err
-        .message
-        .replace(old: "evaluating receiver: ", new: "")
-        .replace(old: "reduce function: ", new: "")
-    }
-    null
-  }
-
-  """
-  Container that has run pytest in this project: over the named project-relative
-  files, or over the whole project when none are named.
-  """
-  let testExec(ws: Workspace!, files: [String!]!): Container! {
-    let project = tool.lib.at(path)
-
+  # The packages pytest runs with, resolved into the environment.
+  let packages(ws: Workspace!): [String!]! {
     # dagger-pytest-otel is mounted and named by path rather than fetched from
     # PyPI, so a module version always runs the plugin source it ships with. uv
     # resolves it with pytest against the project's dependencies while the
     # environment is built, before any source is mounted.
     let plugin = if (tool.tracing) { ["/opt/dagger_pytest_otel"] } else { [] }
-    let packages = ["pytest==" + version(ws)] + plugin
-    let ignoreNested = project.nestedProjects(ws).map { nested => "--ignore=" + nested }
+    ["pytest==" + version(ws)] + plugin
+  }
 
+  let env(ws: Workspace!): Container! {
+    tool.lib.at(path).env(ws, with: packages(ws), mount: tool.pytestOtel, mountPath: "/opt/dagger_pytest_otel")
+  }
+
+  let ignoreNested(ws: Workspace!): [String!]! {
+    tool.lib.at(path).nestedProjects(ws).map { nested => "--ignore=" + nested }
+  }
+
+  """
+  Container that has run pytest over the whole project, failing with the
+  command, its exit code and the end of its output.
+  """
+  let testExec(ws: Workspace!): Container! {
+    let project = tool.lib.at(path)
     project.step(
-      project.env(ws, with: packages, mount: tool.pytestOtel, mountPath: "/opt/dagger_pytest_otel"),
-      project.uvRun(packages) + ["pytest"] + tool.args + ignoreNested + files,
+      env(ws),
+      project.uvRun(packages(ws)) + ["pytest"] + tool.args + ignoreNested(ws),
       "pytest",
       nesting: tool.nesting,
     )
+  }
+
+  """
+  Run the tests a selected collection of this project's test files holds, in
+  one pytest command, and index its report into one result per test.
+
+  Every test check of the project calls this with the same engine-filtered
+  collection, so the command below is the same bytes in each and runs once.
+  Nothing here depends on which check is asking.
+  """
+  let runTests(ws: Workspace!, files: PytestTestFiles!): PytestResults! {
+    let discovered = files
+      .entries
+      .filter { entry => files.files.contains(entry.path) }
+      .map { entry =>
+        PytestSelection(path: entry.path, names: entry.tests.names, narrowed: entry.tests.narrowed)
+      }
+    let selected = discovered.filter { s => s.names.length > 0 }
+    if (selected.length == 0) { raise "no tests selected in pytest project " + path }
+    let empty: [String!]! = []
+    let narrowed = discovered.any { s => s.narrowed }
+    # With nothing selected out at any level, pytest runs the project as it
+    # collects it, honouring its own testpaths and python_files. Otherwise it
+    # runs the selected files, and when tests were selected out too, only the
+    # selected tests of each. Without a delta, a direct call, the explicit
+    # selection is the safe choice.
+    let whole = files.narrowed == false and narrowed == false
+    let targets = if (whole) { empty } else { tool.sorted(selected.map { s => s.path }) }
+    let selection = JSON.encode(selected.map { s => {{path: s.path, names: s.names}} })
+    let filter = if (narrowed) { ["--selection", "/dagger-pytest/selection.json"] } else { empty }
+    let project = tool.lib.at(path)
+    let executed = project.attempt(
+      env(ws)
+        .withDirectory("/opt/dagger-pytest-report", tool.reportHelpers, include: ["dagger_pytest_report.py"])
+        .withNewFile("/dagger-pytest/selection.json", selection)
+        # Created ahead, writable by any user, so a base that runs as another
+        # user can write it and a run that never starts still leaves one.
+        .withNewFile("/dagger-pytest/report.jsonl", "", permissions: 438),
+      project.uvRun(packages(ws))
+        + ["python", "/opt/dagger-pytest-report/dagger_pytest_report.py", "--report", "/dagger-pytest/report.jsonl"]
+        + filter
+        # A file that fails to import fails its own tests, not every other
+        # file's: pytest stops at a collection error otherwise.
+        + ["--", "--continue-on-collection-errors"]
+        + tool.args + ignoreNested(ws) + targets,
+      "/dagger-pytest/stdout.log",
+      "/dagger-pytest/stderr.log",
+      nesting: tool.nesting,
+    )
+    let indexed = tool.indexerBase
+      .withDirectory("/opt/dagger-pytest-report", tool.reportHelpers, include: ["dagger_pytest_index.py"])
+      .withDirectory("/in", executed.directory("/dagger-pytest"))
+      .withExec([
+        "python", "-I", "/opt/dagger-pytest-report/dagger_pytest_index.py",
+        "--report", "/in/report.jsonl",
+        "--stdout", "/in/stdout.log",
+        "--stderr", "/in/stderr.log",
+        "--selection", "/in/selection.json",
+        "--exit-code", `${executed.exitCode}`,
+        "--output", "/out",
+      ])
+    PytestResults(results: indexed.directory("/out"), selections: selected, project: path)
   }
 }
 
@@ -394,7 +547,18 @@ type PytestTestFiles @collection {
   """
   Test files selected in or out since the collection was discovered.
   """
-  delta: CollectionDelta
+  delta: CollectionDelta @delta
+
+  """
+  Whether the active selection removed test files from this collection.
+  """
+  narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
+  """
+  Stored test collections for the files. Lists are data, not artifact paths.
+  The engine filters these collections when passing a selected file set.
+  """
+  entries: [PytestTestFileSelection!]!
 
   let project: PytestProject!
 
@@ -402,28 +566,31 @@ type PytestTestFiles @collection {
   The test file at this project-relative path.
   """
   file(path: String!): PytestTestFile! @get {
-    PytestTestFile(path: path, project: project)
+    PytestTestFile(
+      path: path,
+      tests: entries.filter { entry => entry.path == path }[0]!.tests,
+    )
   }
 
   """
-  Run the selected test files in this project.
+  Run the selected tests in the selected files, in one pytest command.
+
+  A plain function rather than a check: each test is its own check.
   """
-  test(ws: Workspace!): Void @check {
-    # With nothing selected out, run the project's tests as a whole, as pytest
-    # collects them, rather than listing every file. Without a delta, the file
-    # list is the safe choice.
-    let whole = if (delta == null) {
-      false
-    } else {
-      delta.addedKeys.length == 0 and delta.removedKeys.length == 0
-    }
-    if (whole) {
-      project.test(ws)
-    } else if (files.length > 0) {
-      project.runFiles(ws, files)
+  test(ws: Workspace!): Void {
+    if (files.length > 0) {
+      project.runTests(ws, self).assertAllPassed
     }
     null
   }
+}
+
+"""
+A test file and its tests, as the file collection stores them.
+"""
+type PytestTestFileSelection {
+  path: String!
+  tests: PytestTests!
 }
 
 """
@@ -435,12 +602,112 @@ type PytestTestFile {
   """
   path: String!
 
+  """
+  Top-level tests in this file, keyed by name.
+  """
+  tests: PytestTests!
+}
+
+"""
+Top-level tests in a test file, keyed by name: module-level test functions
+and test classes.
+"""
+type PytestTests @collection {
+  """
+  Test function and test class names.
+  """
+  names: [String!]! @keys
+
+  """
+  Tests selected in or out since the collection was discovered.
+  """
+  delta: CollectionDelta @delta
+
+  """
+  Whether the active selection removed tests from this collection.
+  """
+  narrowed: Boolean! { delta == null or delta!.removedKeys.length > 0 }
+
+  let file: String!
+
   let project: PytestProject!
 
   """
-  Run this test file.
+  The top-level test with this name.
   """
-  test(ws: Workspace!): Void @check {
-    project.runFiles(ws, [path])
+  named(name: String!): PytestTest! @get {
+    PytestTest(name: name, file: file, project: project)
   }
+}
+
+"""
+A top-level pytest test: a module-level test function, with all its
+parameters, or a test class, with all its tests.
+"""
+type PytestTest {
+  """
+  Test function or class name.
+  """
+  name: String!
+
+  """
+  The test file, relative to the project root.
+  """
+  file: String!
+
+  let project: PytestProject!
+
+  """
+  Run this test.
+  """
+  test(ws: Workspace!, selection: PytestTestFiles!): Void @check {
+    project.runTests(ws, selection).assertPassed(file, name)
+  }
+}
+
+# The shared indexer keeps each result small, whatever the report's size.
+type PytestResults {
+  let results: Directory!
+  let selections: [PytestSelection!]!
+  let project: String!
+
+  let label(file: String!, name: String!): String! {
+    (if (project == ".") { "" } else { project + "/" }) + file + "::" + name
+  }
+
+  let failure(file: String!, name: String!): String! {
+    let selected = selections.filter { s => s.path == file }
+    if (selected.length == 0) { raise "pytest test file is outside the test selection: " + label(file, name) }
+    if (selected[0]!.names.contains(name) == false) { raise "pytest test is outside the selection: " + label(file, name) }
+    # Numeric ranks, in the byte order the indexer sorts in, keep file and
+    # test names out of paths.
+    let fileIndex = selections.filter { s => s.path < file }.length
+    let testIndex = selected[0]!.names.filter { test => test < name }.length
+    results.file(`${fileIndex}` + "/" + `${testIndex}`).contents
+  }
+
+  let assertPassed(file: String!, name: String!): Void {
+    let text = failure(file, name)
+    if (text != "") { raise "pytest " + label(file, name) + ": " + text }
+    null
+  }
+
+  let assertAllPassed: Void {
+    let empty: [String!]! = []
+    let failures = selections.reduce(empty) { all, s =>
+      all + s.names.map { name =>
+        let text = failure(s.path, name)
+        if (text == "") { "" } else { "- " + label(s.path, name) + ": " + text }
+      }.filter { line => line != "" }
+    }
+    if (failures.length > 0) { raise "pytest failed:\n" + failures.join("\n") }
+    null
+  }
+}
+
+# The helper's immutable copy of a file's filtered collection keys.
+type PytestSelection {
+  let path: String!
+  let names: [String!]!
+  let narrowed: Boolean!
 }

@@ -141,9 +141,12 @@ type MypyProjects @collection {
   }
 
   """
-  Type check the selected projects with mypy.
+  Type check the selected projects with mypy, each with its own command.
+
+  A plain function rather than a check, so that `dagger check` does not run
+  the same work twice: each project's own `typeCheck` is its check.
   """
-  typeCheck(ws: Workspace!): Void @check {
+  typeCheck(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so every
     # project is checked in parallel and every failure is reported.
     let failures = paths.map { p => project(p) }.{{path, failure: typeCheckFailure(ws)}}
