@@ -175,9 +175,13 @@ type UvProjects @collection {
   }
 
   """
-  Audit the selected projects' dependencies for known vulnerabilities.
+  Audit the selected projects' dependencies for known vulnerabilities, each
+  with its own command.
+
+  A plain function rather than a check, so that `dagger check` does not run
+  the same work twice: each project's own `audit` is its check.
   """
-  audit(ws: Workspace!): Void @check {
+  audit(ws: Workspace!): Void {
     # A selection over a list evaluates its elements concurrently, so every
     # project is audited in parallel and every failure is reported.
     let failures = paths.map { p => project(p) }.{{path, failure: auditFailure(ws)}}
@@ -191,9 +195,12 @@ type UvProjects @collection {
   }
 
   """
-  Refresh the selected projects' uv.lock.
+  Refresh the selected projects' uv.lock, as one changeset.
+
+  A plain function rather than a generator: each project's own `lock` is its
+  generator.
   """
-  lock(ws: Workspace!): Changeset! @generate {
+  lock(ws: Workspace!): Changeset! {
     let roots = paths.map { p => project(p) }.{{path, skipLock, locked: hasLockfile(ws)}}
       .filter { p => p.skipLock == false and p.locked }
       .map { p => p.path }

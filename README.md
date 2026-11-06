@@ -21,7 +21,10 @@ github.com/dagger/python
 
 ## Requirements
 
-Every module requires Dagger v1.0.0-beta.15 or later.
+Every module requires Dagger v1.0.0-beta.22 or later, for selected collection
+arguments on checks: each pytest test check receives its project's filtered
+test file collection and passes it to one shared run (see [One run per
+project](#one-run-per-project)).
 
 ## Install
 
@@ -46,9 +49,10 @@ library; see "Relationship to the standalone modules" below.
 
 Each tool module's `projects` is a Dagger collection keyed by project root, so
 it adds a dimension — `ruff-project`, `pytest-project`, `mypy-project`,
-`ty-project`, `uv-project` — that checks and generators select on. pytest adds a
-second one under it, `pytest-test-file`, keyed by test file. For a repository
-with projects `app` and `libs/core`:
+`ty-project`, `uv-project` — that checks and generators select on. pytest adds
+two more under it: `pytest-test-file`, keyed by test file, and under that
+`pytest-test`, keyed by top-level test. For a repository with projects `app`
+and `libs/core`:
 
 ```console
 $ dagger list ruff-projects -a
@@ -56,13 +60,14 @@ $ dagger list pytest-test-files --pytest-project=app -a
 $ dagger check --ruff --check lint --ruff-project=app
 $ dagger check --check type-check              # mypy and ty together
 $ dagger check --pytest --pytest-project=app --pytest-test-file=tests/test_api.py
+$ dagger check --pytest --pytest-project=app --pytest-test=test_login
 $ dagger generate --ruff --ruff-project=app     # ruff format
 $ dagger check -l --all --ruff -f=cli           # one line per project, as flags
 ```
 
 `dagger check --help` lists the flags in effect: `--ruff-project`,
-`--pytest-project`, `--pytest-test-file`, `--mypy-project`, `--ty-project` and
-`--uv-project` select keys (`--ruff-projects`, `--pytest-tests` and so on select
+`--pytest-project`, `--pytest-test-file`, `--pytest-test`, `--mypy-project`,
+`--ty-project` and `--uv-project` select keys (`--ruff-projects`, `--pytest-tests` and so on select
 a whole dimension); `--ruff`, `--pytest`, `--mypy`, `--ty` and `--uv` select a
 module; and `--check <name>` selects a check by name across modules: `lint`,
 `test`, `type-check`, `audit`, or `stale` for the generators' staleness checks.
@@ -118,13 +123,24 @@ project holding it, so a nested project's files are never its parent's. From
 inside a project, one more `findRoots` finds that project's nested projects.
 
 pytest's test files are `test_*.py` and `*_test.py` files holding a line that
-declares a test pytest collects by default: `def test…`, `async def test…` or
-`class Test…`. A helper module named like a test file is not listed, since
-running it alone collects nothing. What a search cannot see is not listed
-either: a test built at runtime, or one found through a project's own
-`python_files`, `python_classes`, `python_functions` or `testpaths`. The
-whole-project run still collects those, because it runs pytest the way the
-project configures it.
+declares, at the top level, a test pytest collects by default: `def test…`,
+`async def test…` or `class Test…`. Each such declaration is one test, and the
+same search that finds the files names them. A helper module named like a test
+file is not listed, since running it alone collects nothing. What a search
+cannot see is not listed either: a test built at runtime, one declared inside
+an `if`, or one found through a project's own `python_files`,
+`python_classes`, `python_functions` or `testpaths`. The whole-project run
+still collects those, because it runs pytest the way the project configures
+it, and fails every check of the project if one of them fails. Files under a
+directory pytest's default `norecursedirs` skips — `build`, `dist`, `venv`,
+`node_modules`, `*.egg`, a dot-directory — are not listed, as a
+whole-project run collects none of them. Where discovery and pytest still
+disagree, the test that pytest never runs fails, saying so.
+
+Listing runs no tool and builds no environment: no `uv sync`, no pytest
+collection, no container at all. A project whose dependencies cannot be
+installed, or whose test files cannot import, still lists its checks; the
+run reports the failure, on those checks.
 
 On a tree with 40 projects and 16,000 files in their virtualenvs, discovery
 for `dagger check -l --all` with all five modules installed takes 4–8 seconds,
@@ -188,17 +204,81 @@ mypy type check failed:
     Found 1 error in 1 file (checked 4 source files)
 ```
 
-### Batches
+### One run per project
 
-Every check runs once per selected set of keys, through the collection's batch
-function, rather than once per project. A batch runs the projects in parallel
-and, when some fail, names every failing project:
+The project is the unit that owns a tool's configuration, environment and
+container, so no two projects ever share a command, and nothing inside one
+project runs its tool twice.
+
+For ruff, mypy, ty and uv the project is also the check: `lint`,
+`type-check`, `audit` and the `format` and `lock` generators each run one
+command over the project. Those tools take files as arguments, but a project's
+check is not the sum of per-file checks — mypy and ty check a whole program,
+and a file list on the command line overrides the files the project's own
+config names — and their machine output lists only diagnostics, so a file that
+passed and a file the tool never read look the same. A per-file check could
+not tell them apart, so there is none.
+
+pytest goes one level further, as `go test` does in `dagger/go`. Each selected
+top-level test — a module-level `test…` function, with all its parameters, or
+a `Test…` class, with all its tests — has its own check. Every test check of a
+project receives the same engine-filtered `tests` collection and calls the same
+helper, which runs one pytest command and returns a shared report. The engine
+deduplicates the identical container operations, so a project's selected
+tests cost one pytest run, however many checks they are:
+
+- With nothing selected out at any level, pytest runs the project as it
+  collects it, honouring its own `testpaths` and `python_files`.
+- With test files selected out, it runs the selected files.
+- With tests selected out too, it runs the selected files, and a bundled
+  plugin deselects every top-level test outside the selection, as `go test
+  -run` leaves tests out.
+
+The command is built from the sorted selection, so every check builds the
+same bytes. The bundled plugin is loaded by name, so pytest-xdist workers
+(`-n` in `args`) load it too and apply the same selection where they collect. It runs with `--continue-on-collection-errors` and never raises;
+the bundled runner writes every report pytest makes as a JSON line, and an
+indexer reads that report once and writes one bounded result per check. Each
+check reads its own: failure messages keep the last 32 KiB of each diagnostic
+stream, and no result exceeds 96 KiB, however large the run.
+
+A failed test fails its own check, with the output of every parameter or
+method that failed. A test file that fails to import, skips at module level
+aside, fails every selected test in it, and so does a failing test discovery
+did not list in a file it did. A failure in a file with no selected test, or a
+non-zero exit with no failure to show for it, fails every check sharing the
+command: it belongs to none of them, and passing them would hide it. A
+selected test pytest never runs while its file passes fails, saying it did not
+run, rather than passing with nothing behind it — a test class with an
+`__init__` is the usual case. A test the project's own `-m`, `-k` or `addopts`
+deselects passes, and so does a test `-x` or `--maxfail` never reached after
+a reported failure. Otherwise passing tests pass.
+
+Logs and test spans belong to the check that started the shared command;
+the other checks share its result. A whole-project run also runs the
+project's tests that are no check, so their failures fail every check of the
+project.
+
+The collection-level functions — `projects(...).lint`, `type-check`, `audit`,
+`format`, `lock`, `build` and `test`, and pytest's `tests(...).test` — are
+plain functions rather than checks or generators, so `dagger check` and
+`dagger generate` never run the same work twice. They run every selected
+project and, when some fail, name every failing project:
 
 ```
 ruff lint failed:
 - testdata/project-lint-fail: exit code: 1
 - testdata/project-ruff-toml: exit code: 2
 ```
+
+There is no `.batch` namespace. Where a caller wrote
+`run(projects(ws).batch.lint(ws))`, it now writes `projects(ws).lint(ws)`: the
+helper returns `Void` and raises on failure, so it is not wrapped as a
+`Check`. The same holds for `typeCheck`, `audit` and pytest's `test`;
+`batch.format`, `batch.fix`, `batch.lock` and `batch.build` become `format`,
+`fix`, `lock` and `build`. A pytest test file has no `test` of its own any
+more: run one with `tests(ws).subset(keys: [file]).test(ws)`, or one test
+through its check, as below.
 
 Generators return one changeset over the selected projects, rooted at the cwd,
 where `dagger generate` applies it. From inside a project, that changeset holds
@@ -219,17 +299,24 @@ let run(check: Check!): Void {
   null
 }
 
-run(ruff.projects(ws).batch.lint(ws))                              # every project
-run(ruff.projects(ws).subset(keys: ["app", "libs/core"]).batch.lint(ws))
-run(ruff.projects(ws).get(key: "app").lint(ws))                    # one project
-let changes = ruff.projects(ws).batch.format(ws)                   # a Changeset
+ruff.projects(ws).lint(ws)                                         # plain: raises on failure
+ruff.projects(ws).subset(keys: ["app", "libs/core"]).lint(ws)
+run(ruff.projects(ws).get(key: "app").lint(ws))                    # one project's check
+let changes = ruff.projects(ws).format(ws)                         # a Changeset
 run(mypy.project(ws, "app/src").typeCheck(ws))                     # by any path inside
-pytest.projects(ws).batch.test(ws)                                  # plain: raises on failure
-run(pytest.project(ws, "app").tests(ws).subset(keys: ["tests/test_api.py"]).batch.test(ws))
+pytest.projects(ws).test(ws)                                       # each project as a whole
+
+let files = pytest.project(ws, "app").tests(ws)
+files.subset(keys: ["tests/test_api.py"]).test(ws)                 # one run, every failure
+run(files.get(key: "tests/test_api.py").tests.get(key: "test_login").test(ws, selection: files))
 ```
 
 `projects(ws).keys` lists the keys, `get(key:)` builds one item, and
-`subset(keys:)` narrows the batch. `dagger call` cannot step into a collection
+`subset(keys:)` narrows a collection. A test check called directly takes the
+collection to run as its `selection`; the shared run covers all of it, and the
+check reads only its own result. A direct call has no engine selection, so
+the run lists the files and tests explicitly rather than running the project
+as pytest collects it. `dagger call` cannot step into a collection
 yet; use `dagger check`, `dagger list`, `dagger -c`, or a module.
 
 ## Scoping
@@ -287,8 +374,9 @@ Pass `includeSkipped: false` to `projects` to leave such projects out.
 
 On a project: `lint` (a `@check`, `ruff check`), `format` (a `@generate`,
 `ruff format`), `fix` (`ruff check --fix --exit-zero`, returns a changeset),
-`version`, `pinned-version` and `skip`. The collection's batch `lint`, `format` and `fix` run once over the
-selected projects.
+`version`, `pinned-version` and `skip`. The collection's `lint`, `format` and
+`fix` are plain functions over the selected projects, each with its own
+command.
 
 `format` is a generator, so `dagger generate` applies it and `dagger check`
 fails when a project is not formatted, as ruff's `stale` check. `fix` is not a
@@ -334,26 +422,29 @@ mount.
 | `base`           | none      | Base image with Python and uv, instead of the default one.  |
 
 On a project: `tests`, `test`, `has-tests`, `version`, `skip`. `tests` is a
-collection of the project's test files, keyed by project-relative path, and its
-`test` is the check:
+collection of the project's test files, keyed by project-relative path; each
+file's `tests` is a collection of its top-level tests, keyed by name; and a
+test's `test` is the check:
 
 ```console
 $ dagger check --pytest --pytest-project=sdk                                # whole project
 $ dagger check --pytest --pytest-project=sdk --pytest-test-file=tests/test_api.py
+$ dagger check --pytest --pytest-test=test_login --pytest-test-file=tests/test_api.py
 ```
 
-With every test file of a project selected, the batch runs `pytest` over the
-whole project, as pytest collects it; with some filtered out, it runs `pytest`
-over the selected files only. One run happens per project either way.
+A test name in two files selects both; `--pytest-test-file` narrows that. One
+pytest run happens per project, whatever is selected: see [One run per
+project](#one-run-per-project).
 
-Test files are found as described in [How projects are
-found](#how-projects-are-found): by name and by a test declaration, without
-running pytest.
+Tests are found as described in [How projects are
+found](#how-projects-are-found): by file name and by a top-level test
+declaration, without running pytest.
 
-`test` on a project and on `projects` are plain functions rather than checks,
-so that `dagger check` does not run the same tests twice. The `projects` batch
-`test` runs every selected project even after one fails, then lists each
-failing project by path.
+`test` on a project, on `projects` and on `tests` are plain functions rather
+than checks, so that `dagger check` does not run the same tests twice. The
+`projects` one runs every selected project as a whole, even after one fails,
+then lists each failing project by path; the `tests` one runs the selected
+files in one shared run and lists each failing test.
 
 A project with no test files is not a key, and its `test` does nothing: bare
 pytest exits 5 on an empty collection, so running it there would fail a project
@@ -394,9 +485,9 @@ the module its address names instead of looking for it inside this module.
 
 On a project: `audit` (a `@check`, `uv audit`), `lock` (a `@generate`,
 `uv lock`), `build` (`uv build`, returns `dist` with the wheel and sdist),
-`has-lockfile`, `skip-lock` and `skip-audit`. The collection's batch `audit`,
-`lock` and `build` run once over the selected projects; the batch `build`
-places each `dist` under its project root.
+`has-lockfile`, `skip-lock` and `skip-audit`. The collection's `audit`, `lock`
+and `build` are plain functions over the selected projects; its `build` places
+each `dist` under its project root.
 
 `audit` runs `uv audit --locked` over the lockfile. To leave dependency groups
 out, pass uv's own flags: `["--no-dev"]` for the `dev` group,
@@ -458,6 +549,7 @@ with a check for the same tool would run that tool twice.
 | `roots`               | Their roots, workspace-root-relative, in byte order.             |
 | `roots-owning`        | The roots owning a file that matches a glob and a pattern.       |
 | `owned-files`         | Those files, workspace-root-relative, from the same one search.  |
+| `owned-matches`       | The matching lines in those files, from the same one search.     |
 | `roots-with`          | The roots holding a named file, such as `uv.lock`.               |
 | `project`             | The project containing a workspace path.                         |
 | `at`                  | The project rooted at a path, with no lookup.                    |
@@ -478,6 +570,7 @@ On a project:
 | `sync-flags`             | `--locked` when the project has a `uv.lock`.                       |
 | `uv-run`                 | The start of a `uv run` command for a tool in `env`.               |
 | `step`                   | Run a command, failing with its name, command, exit code and output. |
+| `attempt`                | Run a command whatever its exit code, its output redirected to files, for a tool whose report several checks share. |
 | `absorbed`               | uv workspace members and path sources below this project that belong to it. |
 | `version-from-vcs`       | Whether the project's version comes from version control.          |
 | `sets-key`               | Whether a config file sets a key in a section.                     |
@@ -488,6 +581,8 @@ On a project:
 | `search-files`           | Files below this root matching a glob and a pattern (one search).  |
 | `has-own-files`          | Whether files matching a glob are this project's, not a child's.   |
 | `own-files`              | Those files, project-relative, unique and in byte order.           |
+| `search-matches`         | The matching lines below this root (one search).                   |
+| `own-matches`            | Those lines in this project's own files, project-relative paths.   |
 | `cwd-path`               | Where this project's changes land in a changeset rooted at the cwd. |
 | `cwd-subpath`            | The part of this project such a changeset can hold.                |
 | `tool-version`           | The version of a tool this project pins, or null.                  |
@@ -553,10 +648,22 @@ Two differences are worth knowing before you switch:
 ## Development
 
 ```sh
-dagger check -m .dagger/modules/e2e
+dagger check --e-2-e
 ```
 
-The suite requires Dagger v1.0.0-beta.15 or later, as the modules do.
+The suite requires Dagger v1.0.0-beta.22 or later, as the modules do.
+
+Direct Dang calls do not apply the engine's filtered collection view, so the
+`selected-*` checks run `dagger check` itself, with the engine's own CLI, over
+small fixture workspaces that install `pytest` from this repository, and
+assert the check totals and messages: several projects and files, excluded
+tests that must not run (also under pytest-xdist), a failing test, a file that
+fails to import, an environment that cannot be built, failures outside any
+selected test, a selected test pytest never runs, and per-project checks for
+ruff and mypy. `selected-one-run-check` asserts that every test check of a
+project reads one pytest run, and `listing-check` that listing runs no tool:
+it lists all five modules over a project whose dependencies, lockfile,
+config and imports are all broken, with base images that hold no tool.
 
 `testdata/` holds the fixture projects the suite runs against. Several of them
 fail on purpose — a failing test, a type error, a stale lockfile — and the

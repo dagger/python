@@ -250,6 +250,21 @@ type Pyproject {
   }
 
   """
+  The lines matching `pattern` in the files, among those the projects in
+  `roots` own, that match the ripgrep `globs`. One search covers every
+  project, as for `ownedFiles`, so this runs no container. Paths are
+  workspace-root-relative; the order is the search's own, so a caller that
+  needs one sorts.
+  """
+  ownedMatches(ws: Workspace!, globs: [String!]!, pattern: String!): [PythonMatch!]! {
+    let candidates = roots(ws)
+    let all = ownershipRoots(ws, candidates)
+    at(searchBase(ws, candidates)).searchMatches(ws, globs, pattern).filter { found =>
+      candidates.contains(ownerOf(all, parentPath(found.path)))
+    }
+  }
+
+  """
   The directory one search has to cover: the enclosing project when the cwd is
   inside one, since its files outside the cwd are its own too, else the cwd.
   """
@@ -724,6 +739,40 @@ type PythonProject {
   }
 
   """
+  The lines matching `pattern` in the files at or below this project root that
+  match the ripgrep `globs`, from one search with `exclude` pruned. Nested
+  projects' files included; paths are workspace-root-relative.
+  """
+  searchMatches(ws: Workspace!, globs: [String!]!, pattern: String!): [PythonMatch!]! {
+    ws
+      .search(paths: ["/" + subpath("")], globs: globs + searchExcludes, pattern: pattern)
+      .{{filePath, matchedLines}}
+      .map { found =>
+        PythonMatch(
+          path: found.filePath.trimPrefix("/").trimPrefix("./"),
+          line: found.matchedLines.trimSuffix("\n").trimSuffix("\r"),
+        )
+      }
+  }
+
+  """
+  The lines matching `pattern` in the files matching the ripgrep `globs` that
+  belong to this project rather than to a project nested inside it, with
+  project-relative paths. The order is the search's own.
+  """
+  ownMatches(ws: Workspace!, globs: [String!]!, pattern: String!): [PythonMatch!]! {
+    let nested = nestedProjects(ws)
+    searchMatches(ws, globs, pattern)
+      .map { found =>
+        PythonMatch(
+          path: if (path == ".") { found.path } else { found.path.trimPrefix(path + "/") },
+          line: found.line,
+        )
+      }
+      .reject { found => nested.any { dir => found.path.hasPrefix(dir + "/") } }
+  }
+
+  """
   `exclude` as ripgrep globs. A "dir/**" pattern also names the directory
   itself, so ripgrep skips it instead of walking every file inside.
   """
@@ -968,6 +1017,49 @@ type PythonProject {
     what: String!,
     nesting: Boolean! = false,
   ): Container! {
+    let done = nestable(ctr, nesting).withExec(args, expect: ReturnType.ANY, daggerInDaggerNewSession: nesting)
+    let code = done.exitCode
+    if (code == 0) {
+      done
+    } else {
+      let tail = (done.stdout + "\n" + done.stderr)
+        .split("\n")
+        .reject { line => line.trimSpace == "" }
+        .takeLast(12)
+        .map { line => "    " + line }
+        .join("\n")
+      let detail = if (tail == "") { "" } else { ":\n" + tail }
+      raise what + " failed (" + args.join(" ") + ", exit code " + toString(code) + ")" + detail
+    }
+  }
+
+  """
+  Run one step whatever its exit code, with its stdout and stderr redirected
+  to the named files, for a caller that reads a machine report and the exit
+  code rather than having the step raise.
+
+  A tool whose results are shared between several checks runs here: a raise
+  would fail every one of them with the same message, while the report can
+  say which of them actually failed.
+  """
+  attempt(
+    ctr: Container!,
+    args: [String!]!,
+    stdout: String!,
+    stderr: String!,
+    nesting: Boolean! = false,
+  ): Container! {
+    nestable(ctr, nesting).withExec(
+      args,
+      expect: ReturnType.ANY,
+      redirectStdout: stdout,
+      redirectStderr: stderr,
+      daggerInDaggerNewSession: nesting,
+    )
+  }
+
+  # A container ready to run a step that may talk to a nested Dagger engine.
+  let nestable(ctr: Container!, nesting: Boolean!): Container! {
     # A nested session finds its workspace root by walking up to a .git
     # directory, and the container mirrors the workspace under /ws, so without
     # a marker there the session gets an empty workspace and every
@@ -982,26 +1074,12 @@ type PythonProject {
     # one at /dev/.dagger/dagger; name it, because the SDK otherwise downloads
     # the release its own client was generated against, over the network and
     # against an engine of whatever version the user is on.
-    let nested = if (nesting) {
+    if (nesting) {
       ctr
         .withDirectory(mountRoot + "/.git", directory)
         .withEnvVariable("_EXPERIMENTAL_DAGGER_CLI_BIN", "/dev/.dagger/dagger")
     } else {
       ctr
-    }
-    let done = nested.withExec(args, expect: ReturnType.ANY, daggerInDaggerNewSession: nesting)
-    let code = done.exitCode
-    if (code == 0) {
-      done
-    } else {
-      let tail = (done.stdout + "\n" + done.stderr)
-        .split("\n")
-        .reject { line => line.trimSpace == "" }
-        .takeLast(12)
-        .map { line => "    " + line }
-        .join("\n")
-      let detail = if (tail == "") { "" } else { ":\n" + tail }
-      raise what + " failed (" + args.join(" ") + ", exit code " + toString(code) + ")" + detail
     }
   }
 
@@ -1225,4 +1303,20 @@ type PythonProject {
       ""
     }
   }
+}
+
+"""
+A line one workspace search matched.
+"""
+type PythonMatch {
+  """
+  The file that holds the line: workspace-root-relative, or project-relative
+  from a project's own search.
+  """
+  path: String!
+
+  """
+  The matched line, without its line ending.
+  """
+  line: String!
 }
