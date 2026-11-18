@@ -86,6 +86,15 @@ type Pyproject {
     Python interpreter and uv on PATH. Mutually exclusive with version.
     """
     base: Container = null,
+    """
+    HTTPS token git presents to gitHost, for a dependency sourced from a
+    private git repository, such as a GitHub App installation token.
+    """
+    gitToken: Secret = null,
+    """
+    Host gitToken is presented to, and to no other.
+    """
+    gitHost: String! = "github.com",
   ) {
     if (markers.isEmpty) {
       raise "markers must not be empty: the caller decides what a project is"
@@ -97,7 +106,7 @@ type Pyproject {
     self.exclude = exclude
     self.includeExtraFiles = includeExtraFiles
     self.version = if (base == null) { version ?? defaultVersion } else { null }
-    self.base = base ?? defaultBase(version ?? defaultVersion)
+    self.base = withGitToken(base ?? defaultBase(version ?? defaultVersion), gitToken, gitHost)
     self
   }
 
@@ -137,6 +146,27 @@ type Pyproject {
       .withEnvVariable("UV_LINK_MODE", "copy")
       .withEnvVariable("UV_NO_PROGRESS", "1")
       .withDirectory("/usr/local/bin", uvBinary, include: ["uv", "uvx"])
+  }
+
+  """
+  `ctr`, with git answering `host`'s credential prompts with `token`.
+
+  uv fetches a git dependency with the git CLI and passes its environment on,
+  so a credential helper declared through GIT_CONFIG_* (git 2.31+) reaches it
+  with no config file written. The helper reads the token from a secret
+  variable at fetch time: it never appears in a layer, a URL, or uv.lock.
+  """
+  let withGitToken(ctr: Container!, token: Secret, host: String!): Container! {
+    if (token == null) { ctr } else {
+      ctr
+        .withSecretVariable(name: "PYPROJECT_GIT_TOKEN", secret: token)
+        .withEnvVariable("GIT_CONFIG_COUNT", "1")
+        .withEnvVariable("GIT_CONFIG_KEY_0", "credential.https://" + host + ".helper")
+        .withEnvVariable(
+          "GIT_CONFIG_VALUE_0",
+          `!f() { test "$1" = get && echo username=x-access-token && echo "password=$PYPROJECT_GIT_TOKEN"; }; f`,
+        )
+    }
   }
 
   """
